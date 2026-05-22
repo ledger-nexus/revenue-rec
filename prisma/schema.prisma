@@ -1,0 +1,338 @@
+// revenue-rec Prisma schema.
+//
+// Two halves:
+//
+//   1. ledger-core models revenue-rec QUERIES (LegalEntity, Book, Party,
+//      JournalEntry, JournalLine, RevenueContract, PerformanceObligation,
+//      RevenueContractBookAttributes). These mirror the canonical
+//      definitions in ledger-core's schema — column-for-column.
+//      revenue-rec does NOT migrate these tables; ledger-core owns the
+//      schema. If ledger-core's schema changes upstream, this copy MUST
+//      be re-synced.
+//
+//   2. revenue-rec-specific models OWNED by this repo (ContractDocument,
+//      AiExtractionSuggestion, RecognitionSchedule, RecognitionEvent).
+//      These live only here; `prisma db push` from this repo creates them
+//      on top of ledger-core's tables.
+//
+// Shared Postgres: revenue-rec connects with the same DATABASE_URL as
+// ledger-core. Same arrangement as recon.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// ledger-core mirror — DO NOT EDIT without syncing upstream
+// =========================================================================
+
+model LegalEntity {
+  id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                 String  @unique
+  name                 String
+  parentEntityId       String? @db.Uuid
+  functionalCurrencyId String
+  sourceSystem         String?
+  sourceRecordType     String?
+  sourceRecordId       String?
+  sourcePayload        Json?
+  mappingVersion       String?
+  extensions           Json?
+
+  journalEntries   JournalEntry[]
+  revenueContracts RevenueContract[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("legal_entity")
+}
+
+model Book {
+  id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String  @unique
+  name                String
+  basis               String
+  reportingCurrencyId String
+  isActive            Boolean @default(true)
+  extensions          Json?
+
+  journalEntries   JournalEntry[]
+  contractBookAttrs RevenueContractBookAttributes[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("book")
+}
+
+model Party {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId      String? @db.Uuid
+  code          String
+  displayName   String
+  parentPartyId String? @db.Uuid
+
+  journalLines     JournalLine[]
+  revenueContracts RevenueContract[] @relation("ContractCustomer")
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("party")
+}
+
+model JournalEntry {
+  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryNumber  String      @unique
+  entityId     String      @db.Uuid
+  entity       LegalEntity @relation(fields: [entityId], references: [id])
+  bookId       String      @db.Uuid
+  book         Book        @relation(fields: [bookId], references: [id])
+  periodId     String?     @db.Uuid
+  documentDate DateTime    @db.Date
+  postingDate  DateTime    @db.Date
+  memo         String
+  currencyId   String
+  fxRate       Decimal     @default(1) @db.Decimal(20, 10)
+  source       String      @default("MANUAL")
+  status       String      @default("POSTED")
+  reversalOfId String?     @db.Uuid
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  lines JournalLine[]
+
+  // Backref to revenue-rec's recognition events.
+  recognitionEvents RecognitionEvent[]
+
+  createdAt DateTime @default(now())
+  createdBy String?
+
+  @@index([entityId, bookId, documentDate])
+  @@map("gl_entry_header")
+}
+
+model JournalLine {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId   String       @db.Uuid
+  entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  lineNo    Int
+  accountId String       @db.Uuid
+
+  partyId        String? @db.Uuid
+  party          Party?  @relation(fields: [partyId], references: [id])
+  itemId         String? @db.Uuid
+  dimensionSetId String? @db.Uuid
+  taxCodeId      String?
+
+  debit  Decimal @default(0) @db.Decimal(18, 4)
+  credit Decimal @default(0) @db.Decimal(18, 4)
+
+  transactionAmount     Decimal @default(0) @db.Decimal(18, 4)
+  transactionCurrencyId String?
+  reportingAmount       Decimal @default(0) @db.Decimal(18, 4)
+  reportingCurrencyId   String?
+
+  description String?
+  extensions  Json?
+
+  @@unique([entryId, lineNo])
+  @@index([accountId])
+  @@map("gl_entry_line")
+}
+
+model RevenueContract {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId           String                @db.Uuid
+  entity             LegalEntity           @relation(fields: [entityId], references: [id])
+  code               String
+  description        String
+  customerPartyId    String                @db.Uuid
+  customer           Party                 @relation("ContractCustomer", fields: [customerPartyId], references: [id])
+  contractStartDate  DateTime              @db.Date
+  contractEndDate    DateTime?             @db.Date
+  totalContractValue Decimal               @db.Decimal(18, 4)
+  currencyId         String
+  status             String                @default("ACTIVE")
+
+  performanceObligations PerformanceObligation[]
+  bookAttributes         RevenueContractBookAttributes[]
+
+  // Backrefs into revenue-rec's owned tables.
+  document            ContractDocument?
+  aiSuggestions       AiExtractionSuggestion[]
+  recognitionSchedules RecognitionSchedule[]
+  recognitionEvents    RecognitionEvent[]
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("revenue_contract")
+}
+
+model PerformanceObligation {
+  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId         String          @db.Uuid
+  contract           RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  sequenceNo         Int
+  description        String
+  ssp                Decimal         @db.Decimal(18, 4)
+  recognitionPattern String
+  startDate          DateTime        @db.Date
+  endDate            DateTime?       @db.Date
+  recognizedToDate   Decimal         @default(0) @db.Decimal(18, 4)
+
+  revenueAccountCode  String
+  deferredAccountCode String
+
+  scheduleEntries RecognitionSchedule[]
+  events          RecognitionEvent[]
+
+  @@unique([contractId, sequenceNo])
+  @@map("performance_obligation")
+}
+
+model RevenueContractBookAttributes {
+  contractId String          @db.Uuid
+  contract   RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  bookId     String          @db.Uuid
+  book       Book            @relation(fields: [bookId], references: [id])
+
+  recognitionBasis     String  @default("ACCRUAL")
+  cumulativeRecognized Decimal @default(0) @db.Decimal(18, 4)
+
+  @@id([contractId, bookId])
+  @@map("revenue_contract_book_attributes")
+}
+
+// =========================================================================
+// revenue-rec-owned models — managed by THIS repo
+// =========================================================================
+
+// The raw contract text (or, in v0.2, a PDF reference). The AI extractor
+// reads from here. We keep the verbatim source so a human can always
+// audit "what did the AI see vs. what did we structure."
+model ContractDocument {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId    String          @unique @db.Uuid
+  contract      RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  filename      String?
+  rawText       String
+  format        String          @default("TEXT")  // TEXT | PDF (v0.2)
+  uploadedAt    DateTime        @default(now())
+  uploadedBy    String?
+
+  @@map("contract_document")
+}
+
+// Every AI extraction run is logged here, even if the human rejects it.
+// Mirrors recon's AiSuggestion table — same audit principle.
+model AiExtractionSuggestion {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId      String          @db.Uuid
+  contract        RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  // The model's structured extraction: array of {description, ssp,
+  // recognitionPattern, startDate, endDate, rationale}.
+  obligationsJson Json
+  // The model's allocation suggestion, if it ran (optional in v0.2).
+  allocationJson  Json?
+
+  modelName        String
+  promptHash       String?
+  promptTokens     Int?
+  completionTokens Int?
+  latencyMs        Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([contractId])
+  @@map("ai_extraction_suggestion")
+}
+
+// One row per (PO, accounting period) that the recognition engine plans
+// to recognize. Generated at contract approval time. Status flips from
+// PLANNED → POSTED as the month-end runner fires.
+//
+// Storing the full schedule (vs. computing on demand) lets the UI render
+// it as a table the user can review and approve before any posting
+// happens. It's also the audit trail of "what we planned vs. what we
+// actually did."
+model RecognitionSchedule {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId        String                @db.Uuid
+  contract          RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId      String                @db.Uuid
+  obligation        PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode          String
+
+  periodStart       DateTime              @db.Date
+  periodEnd         DateTime              @db.Date
+  plannedAmount     Decimal               @db.Decimal(18, 4)
+  status            String                @default("PLANNED")  // PLANNED | POSTED | SKIPPED
+
+  // Backref: which RecognitionEvent posted this schedule entry (null if PLANNED).
+  postedByEventId   String?               @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  @@unique([obligationId, bookCode, periodStart])
+  @@index([contractId, bookCode, periodStart])
+  @@index([status])
+  @@map("recognition_schedule")
+}
+
+// One row per actual recognition JE posted via ledger-core. v0.1 ships
+// the schema but the posting logic ships in v0.2 alongside the bridge
+// integration.
+model RecognitionEvent {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId      String                @db.Uuid
+  contract        RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId    String                @db.Uuid
+  obligation      PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode        String
+
+  periodStart     DateTime              @db.Date
+  periodEnd       DateTime              @db.Date
+  amount          Decimal               @db.Decimal(18, 4)
+
+  // The JE that ledger-core posted, returned by the HTTP bridge.
+  postedEntryId   String                @db.Uuid
+  postedEntry     JournalEntry          @relation(fields: [postedEntryId], references: [id])
+  entryNumber     String
+
+  postedAt        DateTime              @default(now())
+  postedBy        String?
+
+  @@index([contractId, bookCode, periodStart])
+  @@map("recognition_event")
+}
