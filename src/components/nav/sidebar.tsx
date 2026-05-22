@@ -7,10 +7,11 @@ export function Sidebar() {
         <div className="text-xs font-medium uppercase tracking-wider text-ink-500">
           revenue-rec
         </div>
-        <div className="text-[11px] text-ink-400">ASC 606 engine · v0.1</div>
+        <div className="text-[11px] text-ink-400">ASC 606 engine · v0.2</div>
       </div>
       <NavLink href="/">Dashboard</NavLink>
       <NavLink href="/contracts">Contracts</NavLink>
+      <NavLink href="/ai-audit">AI usage</NavLink>
     </aside>
   );
 }
