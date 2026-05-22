@@ -19,6 +19,7 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth, formatPercent } from "@/lib/utils/format";
 import { classifyContractEconomics } from "@/lib/accounting/allocator";
+import { ExtractionPanel, PostRecognitionButton } from "./contract-actions";
 
 export default async function ContractDetailPage({
   params,
@@ -180,6 +181,19 @@ export default async function ContractDetailPage({
 
       <Card>
         <CardHeader>
+          <CardTitle>AI contract extraction</CardTitle>
+          <span className="text-xs text-ink-500">
+            Re-read the stored contract document with Claude Opus 4.7 and propose a
+            structured set of performance obligations. AI suggests; you approve.
+          </span>
+        </CardHeader>
+        <CardContent>
+          <ExtractionPanel contractId={contract.id} hasDocument={!!contract.document} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Recognition schedule (ASC 606 Step 5)</CardTitle>
           <span className="text-xs text-ink-500">
             {contract.recognitionSchedules.length} planned period
@@ -190,7 +204,7 @@ export default async function ContractDetailPage({
         <CardContent className="p-0">
           {contract.recognitionSchedules.length === 0 ? (
             <div className="p-6 text-sm text-ink-500">
-              No schedule generated yet — re-run the seed.
+              No schedule generated yet — re-run the seed or approve an extraction.
             </div>
           ) : (
             <Table>
@@ -201,6 +215,7 @@ export default async function ContractDetailPage({
                   <TH>Period</TH>
                   <TH className="text-right">Planned</TH>
                   <TH>Status</TH>
+                  <TH className="text-right">Action</TH>
                 </tr>
               </THead>
               <TBody>
@@ -226,6 +241,13 @@ export default async function ContractDetailPage({
                         >
                           {s.status}
                         </Badge>
+                      </TD>
+                      <TD className="text-right">
+                        {s.status === "PLANNED" ? (
+                          <PostRecognitionButton scheduleId={s.id} />
+                        ) : (
+                          <span className="text-[11px] text-ink-400">—</span>
+                        )}
                       </TD>
                     </TR>
                   );

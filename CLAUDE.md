@@ -20,22 +20,31 @@ The architecture canon is `docs/ARCHITECTURE.md`.
 
 4. **Penny-perfect totals.** The allocator and schedule generator both round per-element to 2dp and absorb the cumulative rounding residual on the last element so Σ allocations ≡ totalContractValue and Σ schedule periods ≡ allocated amount, exactly. Tests assert this.
 
-## What's wired (v0.1)
+## What's wired (v0.2)
 
 - Prisma schema: 8 ledger-core mirrored models + 4 revenue-rec-owned models (`ContractDocument`, `AiExtractionSuggestion`, `RecognitionSchedule`, `RecognitionEvent`)
 - SSP allocator (`src/lib/accounting/allocator.ts`) — ASC 606 Step 4 math with `classifyContractEconomics` helper (AT_SSP / DISCOUNTED / PREMIUM)
-- Recognition schedule generator (`src/lib/accounting/schedule.ts`) — supports POINT_IN_TIME + OVER_TIME_STRAIGHT; OVER_TIME_USAGE / MILESTONE land in v0.2
-- Sample fixture: Initech SaaS contract — $60K subscription + $10K implementation sold for $60K (discounted), illustrates proportional discount allocation
-- Read-only UI: dashboard, contracts list, contract detail showing PO breakdown + schedule + economics badge + raw contract text
-- Unit tests: 22 tests across allocator + schedule generator (no DB needed)
+- Recognition schedule generator (`src/lib/accounting/schedule.ts`) — supports POINT_IN_TIME + OVER_TIME_STRAIGHT; USAGE / MILESTONE intentionally error with a v0.3 pointer
+- **AI contract extractor** (`src/lib/extraction/ai-extract.ts`) — Claude Opus 4.7 via the official SDK 0.98, `messages.parse` + `zodOutputFormat` for structured output, prompt caching on the system prefix. Per portfolio convention: Opus (not Haiku like recon) because contract interpretation is reasoning-heavy.
+- **HTTP bridge to ledger-core** (`src/lib/ledger-bridge.ts`) — mirror of recon's bridge. Same wire contract on `/api/internal/journal-entries`.
+- **Server Actions**:
+  - `extractContractAction` — runs AI extractor on a contract's stored document, persists AiExtractionSuggestion, returns proposal
+  - `approveExtractionAction` — wipes contract POs + cascades schedule, re-runs deterministic allocator on approved SSPs, regenerates schedule, flips contract to ACTIVE
+  - `postRecognitionAction` — posts ONE PLANNED schedule row via the bridge as a 2-line JE (DR Deferred Revenue, CR Revenue) with `source: "AI_APPROVED"`, then flips schedule to POSTED + bumps `recognizedToDate` + `cumulativeRecognized`
+- **Interactive UI** on contract detail: "Re-run AI extraction" button → AI proposal panel with rationales → "Approve & replace" button. "Post" button per PLANNED schedule row.
+- **Unit tests**: 38 across allocator (11), schedule (11), bridge (9 with mocked fetch), extractor (7 with mocked SDK)
+- **End-to-end smoke script** (`scripts/smoke-test-e2e.ts`) — runs the full extract → post-recognition loop against real infrastructure; gated on env vars.
 
-## What's next (v0.2)
+## What's next (v0.3 ideas)
 
-- AI contract extractor — uses the `claude-api` skill. Reads `ContractDocument.rawText` (and PDFs in v0.2-beta), returns structured `{description, ssp, recognitionPattern, startDate, endDate, rationale}` per PO. **Per portfolio convention, recommend Opus 4.7 for this** — contract interpretation IS reasoning-heavy (unlike recon's matching, which was structured ranking suited to Haiku).
-- Approval UI: human reviews extracted POs, edits, and approves. On approve: contract + POs + schedule rows get persisted; deferred-revenue JEs get posted via the bridge.
-- HTTP bridge to ledger-core (mirror of recon's `src/lib/ledger-bridge.ts`)
-- Month-end recognition run: a Server Action that walks PLANNED schedule rows due in the current period and posts a recognition JE per (PO, period) via the bridge, then flips the schedule row to POSTED
-- `AiExtractionSuggestion` audit panel — same pattern as recon's `AiSuggestion`
+- Multi-line approval flow: edit individual POs before approval, not just accept verbatim
+- OVER_TIME_USAGE pattern (usage-based recognition driven by event ingestion)
+- OVER_TIME_MILESTONE pattern (project-based recognition at named completion points)
+- Variable consideration (expected value / most-likely-amount methods, constraint logic)
+- Contract modifications (cumulative catch-up vs prospective vs separate-contract treatment)
+- Multi-book recognition basis differences (the schema supports it; v0.2 only emits US_GAAP)
+- Initial deferred-revenue posting on approval (currently the per-period JE handles both the deferral debit and the revenue credit implicitly; v0.3 may split this for clarity)
+- `AiExtractionSuggestion` audit panel UI
 
 ## Stack
 
