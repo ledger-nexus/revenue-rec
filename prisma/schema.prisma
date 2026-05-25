@@ -57,7 +57,7 @@ model Book {
   id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code                String  @unique
   name                String
-  basis               String
+  basis               BookBasis
   reportingCurrencyId String
   isActive            Boolean @default(true)
   extensions          Json?
@@ -108,8 +108,8 @@ model JournalEntry {
   memo         String
   currencyId   String
   fxRate       Decimal     @default(1) @db.Decimal(20, 10)
-  source       String      @default("MANUAL")
-  status       String      @default("POSTED")
+  source       JournalSource @default(MANUAL)
+  status       EntryStatus   @default(POSTED)
   reversalOfId String?     @db.Uuid
 
   sourceSystem     String?
@@ -172,7 +172,7 @@ model RevenueContract {
   contractEndDate    DateTime?             @db.Date
   totalContractValue Decimal               @db.Decimal(18, 4)
   currencyId         String
-  status             String                @default("ACTIVE")
+  status             RevenueContractStatus @default(ACTIVE)
 
   performanceObligations PerformanceObligation[]
   bookAttributes         RevenueContractBookAttributes[]
@@ -204,7 +204,7 @@ model PerformanceObligation {
   sequenceNo         Int
   description        String
   ssp                Decimal         @db.Decimal(18, 4)
-  recognitionPattern String
+  recognitionPattern RecognitionPattern
   startDate          DateTime        @db.Date
   endDate            DateTime?       @db.Date
   recognizedToDate   Decimal         @default(0) @db.Decimal(18, 4)
@@ -225,7 +225,7 @@ model RevenueContractBookAttributes {
   bookId     String          @db.Uuid
   book       Book            @relation(fields: [bookId], references: [id])
 
-  recognitionBasis     String  @default("ACCRUAL")
+  recognitionBasis     RecognitionBasis @default(ACCRUAL)
   cumulativeRecognized Decimal @default(0) @db.Decimal(18, 4)
 
   @@id([contractId, bookId])
@@ -335,4 +335,51 @@ model RecognitionEvent {
 
   @@index([contractId, bookCode, periodStart])
   @@map("recognition_event")
+}
+
+// =========================================================================
+// Enums mirrored from ledger-core. MUST stay in sync.
+// =========================================================================
+
+enum BookBasis {
+  US_GAAP
+  US_TAX
+  IFRS
+  MGMT
+  STATUTORY
+}
+
+enum JournalSource {
+  MANUAL
+  SEED
+  SYSTEM
+  AI_APPROVED
+  IMPORT
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  VOID
+  REVERSED
+}
+
+enum RevenueContractStatus {
+  DRAFT
+  ACTIVE
+  AMENDED
+  TERMINATED
+  COMPLETED
+}
+
+enum RecognitionPattern {
+  POINT_IN_TIME
+  OVER_TIME_STRAIGHT
+  OVER_TIME_USAGE
+  OVER_TIME_MILESTONE
+}
+
+enum RecognitionBasis {
+  ACCRUAL
+  CASH
 }
