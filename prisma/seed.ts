@@ -27,7 +27,8 @@ async function main() {
   console.log("revenue-rec seed — wiring sample SaaS contract for Northwind/Initech...");
 
   // 1. Confirm NORTHWIND entity exists (created by ledger-core seed).
-  const entity = await prisma.legalEntity.findUnique({
+  // ledger-core Phase 4b: legalEntity.code unique per [tenantId, code]; findFirst.
+  const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
     select: { id: true },
   });
