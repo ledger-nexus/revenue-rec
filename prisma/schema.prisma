@@ -265,6 +265,14 @@ model AiExtractionSuggestion {
   contractId      String          @db.Uuid
   contract        RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
+  // SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  // row so the audit page can filter without joining through
+  // contract.entity. Nullable to keep db push non-destructive; backfill
+  // via prisma/backfill-ai-extraction-suggestion-tenant.sql. New rows
+  // always get tenantId from extractContractAction's requireCurrentTenant().
+  tenantId        String?         @db.Uuid
+  tenant          Tenant?         @relation(fields: [tenantId], references: [id])
+
   // The model's structured extraction: array of {description, ssp,
   // recognitionPattern, startDate, endDate, rationale}.
   obligationsJson Json
@@ -280,6 +288,7 @@ model AiExtractionSuggestion {
   createdAt DateTime @default(now())
 
   @@index([contractId])
+  @@index([tenantId, createdAt])
   @@map("ai_extraction_suggestion")
 }
 
@@ -402,10 +411,11 @@ model User {
 }
 
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id                     String                   @id @db.Uuid
+  slug                   String                   @unique
+  name                   String
+  memberships            TenantMembership[]
+  aiExtractionSuggestions AiExtractionSuggestion[]
 
   @@map("tenant")
 }

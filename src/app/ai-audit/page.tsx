@@ -38,14 +38,13 @@ interface ExtractedPoJson {
 }
 
 export default async function AiAuditPage() {
-  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
-  // Without this filter, the panel would expose every tenant's AI runs —
-  // including the customer names on the linked contracts.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column on AiExtractionSuggestion. Legacy rows (created before this
+  // column was added) have null tenantId and are filtered out — backfill
+  // via prisma/backfill-ai-extraction-suggestion-tenant.sql.
   const tenant = await getCurrentTenant();
   const suggestions = await prisma.aiExtractionSuggestion.findMany({
-    where: tenant
-      ? { contract: { entity: { tenantId: tenant.id } } }
-      : { id: "__none__" },
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 200,
     select: {

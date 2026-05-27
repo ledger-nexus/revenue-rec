@@ -66,6 +66,7 @@ export async function extractContractAction(
     const suggestion = await prisma.aiExtractionSuggestion.create({
       data: {
         contractId,
+        tenantId: tenant.id,
         obligationsJson: result.extracted.performanceObligations as unknown as object,
         modelName: result.modelName,
         promptHash: result.promptHash,
