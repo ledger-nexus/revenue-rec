@@ -23,6 +23,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
 
 export interface ExtractContractState {
   ok: boolean;
@@ -38,7 +43,7 @@ export async function extractContractAction(
   contractId: string
 ): Promise<ExtractContractState> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     // SECURITY (pen-test pass 4): tenant-scope the document lookup
@@ -60,6 +65,15 @@ export async function extractContractAction(
           "No ContractDocument is attached to this contract — nothing for the AI to read.",
       };
     }
+
+    // Rate limit + monthly spend cap. Extraction is the most expensive
+    // single AI call in the portfolio (Opus 4.7 on contract text), so
+    // this gate matters more here than for recon's Haiku matcher.
+    await enforceAiBudget({
+      tenantId: tenant.id,
+      userId: user.id,
+      action: "extractContract",
+    });
 
     const result = await extractContract(doc.rawText);
 
@@ -92,6 +106,8 @@ export async function extractContractAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in to extract a contract." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
       return { ok: false, message: e.message };
     return {
       ok: false,
