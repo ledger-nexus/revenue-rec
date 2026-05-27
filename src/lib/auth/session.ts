@@ -2,6 +2,7 @@
 // Mirror of recon's session.ts. See that file for full design rationale.
 
 import { prisma } from "@/lib/db";
+import type { TenantRole } from "@prisma/client";
 
 export interface CurrentUser {
   id: string;
@@ -13,7 +14,8 @@ export interface CurrentTenant {
   id: string;
   slug: string;
   name: string;
-  role: string;
+  /** Role of the current user in this tenant. See src/lib/auth/policy.ts. */
+  role: TenantRole;
 }
 
 export class NotAuthenticatedError extends Error {
