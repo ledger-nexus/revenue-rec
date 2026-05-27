@@ -24,6 +24,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 const OPUS_INPUT_PER_M = 5.0;
 const OPUS_OUTPUT_PER_M = 25.0;
@@ -37,7 +38,14 @@ interface ExtractedPoJson {
 }
 
 export default async function AiAuditPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this filter, the panel would expose every tenant's AI runs —
+  // including the customer names on the linked contracts.
+  const tenant = await getCurrentTenant();
   const suggestions = await prisma.aiExtractionSuggestion.findMany({
+    where: tenant
+      ? { contract: { entity: { tenantId: tenant.id } } }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 200,
     select: {

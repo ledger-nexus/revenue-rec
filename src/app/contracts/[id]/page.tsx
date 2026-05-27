@@ -20,14 +20,21 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth, formatPercent } from "@/lib/utils/format";
 import { classifyContractEconomics } from "@/lib/accounting/allocator";
 import { ExtractionPanel, PostRecognitionButton } from "./contract-actions";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function ContractDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const contract = await prisma.revenueContract.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read. Without
+  // this, a signed-in user could navigate to /contracts/[any-uuid] and
+  // read the full rawText of any tenant's contract — PII, pricing,
+  // contractual terms. The most sensitive single read leak in this repo.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const contract = await prisma.revenueContract.findFirst({
+    where: { id: params.id, entity: { tenantId: tenant.id } },
     include: {
       customer: { select: { displayName: true, code: true } },
       performanceObligations: { orderBy: { sequenceNo: "asc" } },

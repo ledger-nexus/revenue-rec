@@ -11,10 +11,22 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function DashboardPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the dashboard
+  // aggregates. Without these filters, the dashboard would tally Σ
+  // contract value + recognized revenue across every tenant.
+  const tenant = await getCurrentTenant();
+  const contractWhere = tenant
+    ? { entity: { tenantId: tenant.id } }
+    : { id: "__none__" };
+  const scheduleWhere = tenant
+    ? { contract: { entity: { tenantId: tenant.id } } }
+    : { id: "__none__" };
   const [contracts, schedules] = await Promise.all([
     prisma.revenueContract.findMany({
+      where: contractWhere,
       select: {
         id: true,
         code: true,
@@ -27,6 +39,7 @@ export default async function DashboardPage() {
       orderBy: { contractStartDate: "desc" },
     }),
     prisma.recognitionSchedule.findMany({
+      where: scheduleWhere,
       select: { plannedAmount: true, status: true },
     }),
   ]);
