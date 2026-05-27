@@ -24,6 +24,12 @@ import { Decimal } from "decimal.js";
 import { prisma } from "@/lib/db";
 import { allocateTransactionPrice } from "@/lib/accounting/allocator";
 import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
   generateSchedule,
   type RecognitionPattern,
 } from "@/lib/accounting/schedule";
@@ -60,8 +66,15 @@ export async function approveExtractionAction(
   input: ApproveInput
 ): Promise<ApproveState> {
   try {
-    const contract = await prisma.revenueContract.findUnique({
-      where: { id: input.contractId },
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    // SECURITY (pen-test pass 4): tenant-scope the contract lookup.
+    // Without this, a foreign-tenant contract could be wiped/replaced
+    // by any signed-in user — deleteMany on POs, replace with new
+    // ones, flip status to ACTIVE.
+    const contract = await prisma.revenueContract.findFirst({
+      where: { id: input.contractId, entity: { tenantId: tenant.id } },
       select: {
         id: true,
         totalContractValue: true,
@@ -69,7 +82,7 @@ export async function approveExtractionAction(
         contractEndDate: true,
       },
     });
-    if (!contract) return { ok: false, message: "Contract not found" };
+    if (!contract) return { ok: false, message: "Contract not found in this tenant" };
 
     if (input.performanceObligations.length === 0) {
       return { ok: false, message: "At least one performance obligation required" };
@@ -180,6 +193,10 @@ export async function approveExtractionAction(
       scheduleRowCount,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }

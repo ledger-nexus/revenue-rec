@@ -33,10 +33,9 @@ datasource db {
 
 model LegalEntity {
   id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Phase 4b in ledger-core: code is unique per [tenantId, code], not globally.
-  // revenue-rec's mirror doesn't carry tenantId (read-only here), so we just
-  // drop the global @unique. Callers use findFirst — the multi-tenant
-  // ambiguity is now visible at the type level.
+  // SECURITY (pen-test pass 4): tenantId added so Server Actions can
+  // tenant-scope their record lookups. Column exists in the shared DB.
+  tenantId             String  @db.Uuid
   code                 String
   name                 String
   parentEntityId       String? @db.Uuid
@@ -388,4 +387,37 @@ enum RecognitionPattern {
 enum RecognitionBasis {
   ACCRUAL
   CASH
+}
+
+// Shared multi-tenancy tables (managed by ledger-core; revenue-rec
+// reads them for tenant resolution). Pen-test pass 4.
+model User {
+  id          String  @id @db.Uuid
+  email       String  @unique
+  displayName String
+  isActive    Boolean @default(true)
+  memberships TenantMembership[]
+
+  @@map("app_user")
+}
+
+model Tenant {
+  id          String  @id @db.Uuid
+  slug        String  @unique
+  name        String
+  memberships TenantMembership[]
+
+  @@map("tenant")
+}
+
+model TenantMembership {
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  role     String
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([tenantId, userId])
+  @@map("tenant_membership")
 }

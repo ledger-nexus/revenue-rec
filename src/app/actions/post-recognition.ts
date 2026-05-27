@@ -43,6 +43,12 @@ import {
   postEntryViaLedgerCore,
   LedgerCoreError,
 } from "@/lib/ledger-bridge";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 export interface PostRecognitionInput {
   scheduleId: string;
@@ -59,8 +65,19 @@ export async function postRecognitionAction(
   input: PostRecognitionInput
 ): Promise<PostRecognitionState> {
   try {
-    const schedule = await prisma.recognitionSchedule.findUnique({
-      where: { id: input.scheduleId },
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    // SECURITY (pen-test pass 4): tenant-scope the lookup via
+    // schedule → contract → entity → tenantId. THIS WAS THE WORST
+    // GAP in this repo — anonymous JE posting via the ledger bridge
+    // against any tenant's schedule + state mutation of
+    // recognizedToDate + cumulativeRecognized on the foreign tenant.
+    const schedule = await prisma.recognitionSchedule.findFirst({
+      where: {
+        id: input.scheduleId,
+        contract: { entity: { tenantId: tenant.id } },
+      },
       select: {
         id: true,
         status: true,
@@ -89,7 +106,7 @@ export async function postRecognitionAction(
         },
       },
     });
-    if (!schedule) return { ok: false, message: "Schedule row not found" };
+    if (!schedule) return { ok: false, message: "Schedule row not found in this tenant" };
 
     if (schedule.status !== "PLANNED") {
       return {
@@ -147,7 +164,8 @@ export async function postRecognitionAction(
           amount: amount.toFixed(4),
           postedEntryId: posted.id,
           entryNumber: posted.entryNumber,
-          postedBy: input.postedBy ?? null,
+          // SECURITY: stamp the authenticated user, not caller-supplied input.
+          postedBy: user.email,
         },
         select: { id: true },
       });
@@ -179,6 +197,12 @@ export async function postRecognitionAction(
       entryNumber: posted.entryNumber,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError) {
+      return { ok: false, message: "You must be signed in to post recognition." };
+    }
+    if (e instanceof NoTenantSelectedError) {
+      return { ok: false, message: e.message };
+    }
     if (e instanceof LedgerCoreError) {
       return { ok: false, message: `ledger-core ${e.code}: ${e.message}` };
     }

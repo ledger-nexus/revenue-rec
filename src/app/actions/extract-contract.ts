@@ -17,6 +17,12 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { extractContract, type ExtractionResponse } from "@/lib/extraction/ai-extract";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 export interface ExtractContractState {
   ok: boolean;
@@ -32,8 +38,19 @@ export async function extractContractAction(
   contractId: string
 ): Promise<ExtractContractState> {
   try {
-    const doc = await prisma.contractDocument.findUnique({
-      where: { contractId },
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    // SECURITY (pen-test pass 4): tenant-scope the document lookup
+    // via document → contract → entity → tenantId. WITHOUT THIS,
+    // the action ships any tenant's contract rawText (PII, pricing,
+    // T&Cs) to the Anthropic API on behalf of a foreign caller —
+    // direct cross-tenant data exfiltration.
+    const doc = await prisma.contractDocument.findFirst({
+      where: {
+        contractId,
+        contract: { entity: { tenantId: tenant.id } },
+      },
       select: { id: true, rawText: true, contractId: true },
     });
     if (!doc) {
@@ -71,6 +88,10 @@ export async function extractContractAction(
       latencyMs: result.latencyMs,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in to extract a contract." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error during extraction",
