@@ -16,16 +16,22 @@
 //                         maintenance contracts. Penny rounding lands on
 //                         the last period to keep Σ = allocated.
 //
-// Out of scope for v0.1:
+// Supported in v0.3:
 //
 //   OVER_TIME_USAGE     — recognize as the customer consumes (usage-based
-//                         billing). Schedule can't be planned ahead; it's
-//                         emitted as usage events arrive.
+//                         billing). The schedule starts EMPTY at contract
+//                         approval; RecognitionSchedule rows are created
+//                         on-the-fly when usage is reported via
+//                         recordUsageAction. Each row's plannedAmount =
+//                         usageQuantity × PO.pricePerUnit. The generator
+//                         here returns [] for this pattern — the contract
+//                         is "open-ended" until usage lands.
+//
+// Out of scope:
+//
 //   OVER_TIME_MILESTONE — recognize at named project milestones. The
 //                         schedule needs milestone-level inputs (estimated
-//                         completion %), not just date math.
-//
-// Both will land in v0.2 alongside the AI extractor.
+//                         completion %), not just date math. Future work.
 //
 // All math uses Decimal. Periods are monthly, identified by the calendar
 // month containing the start. We compute (year, month) windows because
@@ -105,6 +111,13 @@ export function generateSchedule(input: ScheduleInput): SchedulePeriod[] {
         plannedAmount: allocated,
       },
     ];
+  }
+
+  if (input.pattern === "OVER_TIME_USAGE") {
+    // Empty schedule by design. RecognitionSchedule rows accrete as
+    // usage is reported via recordUsageAction. See the comment block
+    // above for the rationale.
+    return [];
   }
 
   if (input.pattern === "OVER_TIME_STRAIGHT") {

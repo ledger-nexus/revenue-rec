@@ -10,6 +10,7 @@
 // All read-only in v0.1. The "Post next period" + "Re-run AI extractor"
 // actions land in v0.2.
 
+import * as React from "react";
 import Link from "next/link";
 import { Decimal } from "decimal.js";
 import { notFound } from "next/navigation";
@@ -18,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth, formatPercent } from "@/lib/utils/format";
+import { UsageControls } from "./usage-controls";
 import { classifyContractEconomics } from "@/lib/accounting/allocator";
 import { ExtractionPanel, PostRecognitionButton } from "./contract-actions";
 import { getCurrentTenant } from "@/lib/auth/session";
@@ -155,21 +157,36 @@ export default async function ContractDetailPage({
                   ? new Decimal(0)
                   : allocated.dividedBy(totalDecimal).times(100);
                 return (
-                  <TR key={po.id}>
-                    <TD className="text-ink-400">{po.sequenceNo}</TD>
-                    <TD className="text-ink-900">{po.description}</TD>
-                    <TD>
-                      <Badge tone="info">{po.recognitionPattern}</Badge>
-                    </TD>
-                    <TD className="text-xs text-ink-500">
-                      {formatDate(po.startDate)}
-                      {po.endDate ? ` → ${formatDate(po.endDate)}` : ""}
-                    </TD>
-                    <TD className="font-mono text-xs">{po.revenueAccountCode}</TD>
-                    <TD className="font-mono text-xs">{po.deferredAccountCode}</TD>
-                    <TD className="amount-cell text-right">{formatMoney(allocated)}</TD>
-                    <TD className="text-right text-ink-700">{formatPercent(pct)}</TD>
-                  </TR>
+                  <React.Fragment key={po.id}>
+                    <TR>
+                      <TD className="text-ink-400">{po.sequenceNo}</TD>
+                      <TD className="text-ink-900">{po.description}</TD>
+                      <TD>
+                        <Badge tone="info">{po.recognitionPattern}</Badge>
+                      </TD>
+                      <TD className="text-xs text-ink-500">
+                        {formatDate(po.startDate)}
+                        {po.endDate ? ` → ${formatDate(po.endDate)}` : ""}
+                      </TD>
+                      <TD className="font-mono text-xs">{po.revenueAccountCode}</TD>
+                      <TD className="font-mono text-xs">{po.deferredAccountCode}</TD>
+                      <TD className="amount-cell text-right">{formatMoney(allocated)}</TD>
+                      <TD className="text-right text-ink-700">{formatPercent(pct)}</TD>
+                    </TR>
+                    {po.recognitionPattern === "OVER_TIME_USAGE" && (
+                      <TR>
+                        <TD colSpan={8}>
+                          <UsageControls
+                            obligationId={po.id}
+                            pricePerUnit={
+                              po.pricePerUnit ? po.pricePerUnit.toString() : null
+                            }
+                            unitName={po.unitName}
+                          />
+                        </TD>
+                      </TR>
+                    )}
+                  </React.Fragment>
                 );
               })}
               <TR className="bg-ink-50 font-medium">
