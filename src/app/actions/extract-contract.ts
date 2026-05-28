@@ -29,6 +29,7 @@ import {
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
+import { requireRepoAccess, RepoNotIncludedError } from "@/lib/auth/repo-access";
 
 export interface ExtractContractState {
   ok: boolean;
@@ -46,6 +47,9 @@ export async function extractContractAction(
   try {
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    // Plan gate: revenue-rec is Growth+. Throws on free / starter
+    // (when enforcement is on; soft-warns in dev).
+    requireRepoAccess(tenant);
 
     // SECURITY (pen-test pass 4): tenant-scope the document lookup
     // via document → contract → entity → tenantId. WITHOUT THIS,
@@ -111,6 +115,8 @@ export async function extractContractAction(
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
     if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message };
+    if (e instanceof RepoNotIncludedError)
       return { ok: false, message: e.message };
     return {
       ok: false,

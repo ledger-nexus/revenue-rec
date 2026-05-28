@@ -417,6 +417,10 @@ model Tenant {
   /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
   /// revenue-rec never writes this column.
   monthlyAiSpendCapUsd    Decimal?                 @db.Decimal(10, 2)
+  /// Mirror of ledger-core's Tenant.billingPlan + subscriptionStatus.
+  /// session.requireRepoAccess() reads these to gate by plan.
+  billingPlan             String?
+  subscriptionStatus      String?
   memberships             TenantMembership[]
   aiExtractionSuggestions AiExtractionSuggestion[]
   rateLimitEvents         RateLimitEvent[]
