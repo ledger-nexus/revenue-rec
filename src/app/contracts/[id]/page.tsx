@@ -22,6 +22,7 @@ import { formatDate, formatMoney, formatMonth, formatPercent } from "@/lib/utils
 import { UsageControls } from "./usage-controls";
 import { classifyContractEconomics } from "@/lib/accounting/allocator";
 import { ExtractionPanel, PostRecognitionButton } from "./contract-actions";
+import { VariableConsiderationPanel } from "./variable-consideration-panel";
 import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function ContractDetailPage({
@@ -47,6 +48,18 @@ export default async function ContractDetailPage({
         orderBy: [{ obligationId: "asc" }, { periodStart: "asc" }],
       },
       document: { select: { filename: true, format: true, rawText: true } },
+      variableConsiderations: {
+        orderBy: { createdAt: "asc" },
+        include: {
+          obligation: { select: { sequenceNo: true, description: true } },
+          reassessments: {
+            orderBy: { reassessedAt: "desc" },
+            take: 1,
+            select: { catchUpAmount: true },
+          },
+          _count: { select: { reassessments: true } },
+        },
+      },
     },
   });
   if (!contract) notFound();
@@ -213,6 +226,47 @@ export default async function ContractDetailPage({
         </CardHeader>
         <CardContent>
           <ExtractionPanel contractId={contract.id} hasDocument={!!contract.document} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Variable consideration (ASC 606 Step 3)</CardTitle>
+          <span className="text-xs text-ink-500">
+            Bonuses, refund rights, volume rebates, and other variable amounts.
+            Each component is estimated (expected value or most-likely amount),
+            constrained per ASC 606-10-32-11, and reassessed each period. Changes
+            in estimate post as cumulative catch-ups to revenue.
+          </span>
+        </CardHeader>
+        <CardContent>
+          <VariableConsiderationPanel
+            contractId={contract.id}
+            obligations={contract.performanceObligations.map((po) => ({
+              id: po.id,
+              sequenceNo: po.sequenceNo,
+              description: po.description,
+            }))}
+            components={contract.variableConsiderations.map((v) => ({
+              id: v.id,
+              description: v.description,
+              method: v.method,
+              direction: v.direction,
+              status: v.status,
+              currentConstrainedAmount: v.currentConstrainedAmount.toString(),
+              currentUnconstrainedAmount: v.currentUnconstrainedAmount.toString(),
+              constraintRationale: v.constraintRationale,
+              resolvedAmount: v.resolvedAmount ? v.resolvedAmount.toString() : null,
+              obligationLabel: v.obligation
+                ? `PO #${v.obligation.sequenceNo} — ${v.obligation.description}`
+                : null,
+              reassessmentCount: v._count.reassessments,
+              latestCatchUp:
+                v.reassessments[0]?.catchUpAmount
+                  ? v.reassessments[0].catchUpAmount.toString()
+                  : null,
+            }))}
+          />
         </CardContent>
       </Card>
 

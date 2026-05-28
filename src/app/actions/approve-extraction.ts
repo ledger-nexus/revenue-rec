@@ -33,6 +33,10 @@ import {
   generateSchedule,
   type RecognitionPattern,
 } from "@/lib/accounting/schedule";
+import {
+  computeAdjustedTransactionPrice,
+  type VariableConsiderationComponent,
+} from "@/lib/accounting/variable-consideration";
 
 export interface ApproveInput {
   contractId: string;
@@ -80,6 +84,23 @@ export async function approveExtractionAction(
         totalContractValue: true,
         contractStartDate: true,
         contractEndDate: true,
+        // Pull variable consideration so the allocator runs against
+        // the adjusted transaction price, not the bare contract total.
+        // Approval is the moment the deterministic engine "owns" the
+        // contract — it has to consume variable consideration the
+        // same way subsequent reassessments will.
+        variableConsiderations: {
+          where: { status: "ACTIVE" },
+          select: {
+            id: true,
+            description: true,
+            method: true,
+            direction: true,
+            status: true,
+            currentConstrainedAmount: true,
+            currentUnconstrainedAmount: true,
+          },
+        },
       },
     });
     if (!contract) return { ok: false, message: "Contract not found in this tenant" };
@@ -88,10 +109,28 @@ export async function approveExtractionAction(
       return { ok: false, message: "At least one performance obligation required" };
     }
 
-    // Run the allocator on the approved SSPs + final total.
-    const total = new Decimal(
+    // Apply variable consideration adjustment to the base contract
+    // value BEFORE allocating. The allocator and schedule generator
+    // are unchanged — they always work on the adjusted price.
+    const baseTotal = new Decimal(
       input.totalContractValue ?? contract.totalContractValue.toString()
     );
+    const variableComponents: VariableConsiderationComponent[] =
+      contract.variableConsiderations.map((c) => ({
+        id: c.id,
+        description: c.description,
+        method: c.method,
+        direction: c.direction,
+        status: c.status,
+        constrainedAmount: c.currentConstrainedAmount.toString(),
+        unconstrainedAmount: c.currentUnconstrainedAmount.toString(),
+      }));
+    const adjusted = computeAdjustedTransactionPrice({
+      baseAmount: baseTotal,
+      components: variableComponents,
+    });
+    const total = adjusted.adjustedAmount;
+
     const allocations = allocateTransactionPrice({
       totalContractValue: total,
       performanceObligations: input.performanceObligations.map((po) => ({
