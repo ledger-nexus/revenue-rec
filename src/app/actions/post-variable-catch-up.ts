@@ -227,6 +227,31 @@ export async function postVariableCatchUpAction(
     // legitimately take 2-3s, so we bump to 30s.
     await prisma.$transaction(
       async (tx) => {
+        // CLAIM the reassessment row by stamping postedAt while
+        // postedEventId is still null. updateMany returns count;
+        // 0 means a concurrent run already claimed (Postgres
+        // serializes via row-level lock during updateMany; the
+        // second tx unblocks AFTER the first commits with
+        // postedEventId set, so the WHERE evaluates to no-match).
+        //
+        // This guards against the case where two clicks pass the
+        // outer postedEventId check at line ~123 simultaneously,
+        // both enter the transaction, both call the bridge (which
+        // dedupes), and both proceed to create RecognitionEvents +
+        // double-increment recognizedToDate.
+        //
+        // The bridge call runs AFTER the claim so we don't waste a
+        // ledger-core POST in the race-loss case.
+        const claim = await tx.variableConsiderationReassessment.updateMany({
+          where: { id: reassess.id, postedEventId: null, postedAt: null },
+          data: { postedAt: new Date() },
+        });
+        if (claim.count === 0) {
+          throw new Error(
+            "Catch-up already posted (or being posted by a concurrent request)"
+          );
+        }
+
         const posted = await postEntryViaLedgerCore({
           entityCode: reassess.variableConsideration.contract.entity.code,
           bookCode,
@@ -285,17 +310,13 @@ export async function postVariableCatchUpAction(
           },
           data: { cumulativeRecognized: { increment: totalCatchUp.toFixed(4) } },
         });
-        // Stamp postedEventId + postedAt on the reassessment so it
-        // can't be double-posted. firstEventId tracks the first
-        // RecognitionEvent we created in this loop, avoiding a
-        // post-loop findFirst against postedAt ordering (which is
-        // populated by @default and may collide on the same JE).
+        // Finalize the claim with the real postedEventId. postedAt
+        // was set by the claim above (which guarded against
+        // concurrent double-post); this update just records which
+        // event row is the canonical pointer.
         await tx.variableConsiderationReassessment.update({
           where: { id: reassess.id },
-          data: {
-            postedEventId: firstEventId,
-            postedAt: new Date(),
-          },
+          data: { postedEventId: firstEventId },
         });
 
         // Forward the entry number out of the transaction closure
