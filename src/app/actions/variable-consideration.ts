@@ -826,11 +826,27 @@ export async function resolveVariableConsiderationAction(
         // automatically.
         const baseInfo = getEffectiveBaseAmount(contract);
         const base = baseInfo.baseAmount;
+        // Self-audit fix: a negative back-derived base indicates the
+        // contract state is internally inconsistent — totalContractValue
+        // is less than the sum of active VC components, which shouldn't
+        // happen if the engine has been the sole writer. Pre-fix we
+        // silently clamped to 0, which masked the bug and produced a
+        // misleading totalContractValue update. Now we throw so the
+        // tx rolls back and the operator sees the contract needs
+        // attention before further VC actions land.
+        if (base.lessThan(0)) {
+          throw new Error(
+            `Contract ${contract.id} has an internally inconsistent base amount ` +
+              `(back-derived value ${base.toFixed(2)} is negative). ` +
+              `Active VC components exceed totalContractValue. ` +
+              `Stamp originalBaseAmount manually before resolving further components.`
+          );
+        }
         const activeComponents = contract.variableConsiderations
           .filter((c) => c.status === "ACTIVE")
           .map((c) => toComponent(c as Parameters<typeof toComponent>[0]));
         const adjusted = computeAdjustedTransactionPrice({
-          baseAmount: base.lessThan(0) ? 0 : base,
+          baseAmount: base,
           components: activeComponents,
         });
         await tx.revenueContract.update({
