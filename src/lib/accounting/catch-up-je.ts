@@ -58,7 +58,7 @@ export interface BuildCatchUpJeResult {
   /** Σ DR across the JE (rounded). Equals Σ CR by construction. */
   totalDebits: Decimal;
   /** Number of POs whose catch-up was non-zero and contributed lines. */
-  participatingPoCount: Number;
+  participatingPoCount: number;
 }
 
 /**

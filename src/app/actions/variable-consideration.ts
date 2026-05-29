@@ -258,7 +258,7 @@ export async function addVariableConsiderationAction(
   input: AddVarConsInput
 ): Promise<VarConsActionResult> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     // Validate the constraint invariant before touching the DB.
@@ -360,7 +360,7 @@ export async function addVariableConsiderationAction(
               }))
             : Prisma.JsonNull,
           rationale: input.constraintRationale,
-          reassessedBy: tenant.id,
+          reassessedBy: user.email,
         },
         select: { id: true },
       });
@@ -392,7 +392,7 @@ export async function reassessVariableConsiderationAction(
   input: ReassessVarConsInput
 ): Promise<VarConsActionResult> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     validateConstraint({
@@ -485,7 +485,7 @@ export async function reassessVariableConsiderationAction(
             newUnconstrainedAmount: new Decimal(input.newUnconstrainedAmount).toFixed(4),
             catchUpAmount: null,
             rationale: input.rationale,
-            reassessedBy: tenant.id,
+            reassessedBy: user.email,
           },
           select: { id: true },
         });
@@ -571,7 +571,7 @@ export async function reassessVariableConsiderationAction(
             amount: p.catchUp.toFixed(4),
           })),
           rationale: input.rationale,
-          reassessedBy: tenant.id,
+          reassessedBy: user.email,
         },
         select: { id: true },
       });
@@ -613,7 +613,7 @@ export async function resolveVariableConsiderationAction(
   input: ResolveVarConsInput
 ): Promise<VarConsActionResult> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     const target = await prisma.variableConsideration.findFirst({
@@ -652,44 +652,74 @@ export async function resolveVariableConsiderationAction(
     });
     if (!reassessment.ok) return reassessment;
 
-    await prisma.variableConsideration.update({
-      where: { id: target.id },
-      data: {
-        status: "RESOLVED",
-        resolvedAmount: new Decimal(input.actualAmount).toFixed(4),
-        resolvedAt: new Date(),
-        resolvedBy: tenant.id,
-      },
-    });
+    // ATOMICITY: status flip + contract total recompute must commit
+    // together. Audit-pass fix — the previous version did two
+    // standalone updates, so a partial failure could leave the
+    // component reassessed-but-not-RESOLVED (audit trail says
+    // "actual: $X" but status is still ACTIVE).
+    //
+    // Note: we re-fetch the contract INSIDE the transaction so the
+    // recompute sees the reassessment's update to totalContractValue
+    // (which committed before this call returned).
+    await prisma.$transaction(async (tx) => {
+      await tx.variableConsideration.update({
+        where: { id: target.id },
+        data: {
+          status: "RESOLVED",
+          resolvedAmount: new Decimal(input.actualAmount).toFixed(4),
+          resolvedAt: new Date(),
+          resolvedBy: user.email,
+        },
+      });
 
-    // Recompute the contract's total now that the resolved component
-    // is no longer ACTIVE. This is necessary because reassess updated
-    // totalContractValue assuming the component was still ACTIVE with
-    // the actual as its constrained amount. After RESOLVED it drops
-    // out — but the recognized-to-date has already absorbed the
-    // actual, so the "remaining to recognize" should be the same.
-    // We reload + recompute against the now-non-ACTIVE component.
-    const contract = await loadContractState(prisma, target.contractId, tenant.id);
-    if (contract && contract.performanceObligations.length > 0) {
-      const base = new Decimal(contract.totalContractValue.toString())
-        .minus(new Decimal(input.actualAmount));
-      const activeComponents = contract.variableConsiderations
-        .filter((c) => c.status === "ACTIVE")
-        .map((c) => toComponent(c as Parameters<typeof toComponent>[0]));
-      const adjusted = computeAdjustedTransactionPrice({
-        baseAmount: base.lessThan(0) ? 0 : base,
-        components: activeComponents,
+      // Recompute the contract's total now that the resolved
+      // component is no longer ACTIVE. This is necessary because
+      // reassess updated totalContractValue assuming the component
+      // was still ACTIVE with the actual as its constrained amount.
+      // After RESOLVED it drops out — but the recognized-to-date has
+      // already absorbed the actual, so the "remaining to recognize"
+      // should be the same.
+      const contract = await tx.revenueContract.findFirst({
+        where: { id: target.contractId, entity: { tenantId: tenant.id } },
+        select: {
+          id: true,
+          totalContractValue: true,
+          performanceObligations: { select: { id: true } },
+          variableConsiderations: {
+            where: { status: { not: "REVERSED" } },
+            select: {
+              id: true,
+              description: true,
+              method: true,
+              direction: true,
+              status: true,
+              currentConstrainedAmount: true,
+              currentUnconstrainedAmount: true,
+            },
+          },
+        },
       });
-      // Note: we recompute against the original-base-minus-actual,
-      // which is an approximation — accurate when the resolved
-      // component was the only adjustment. Multiple-component
-      // contracts may need a stored "originalBase" field; tracked as
-      // a v0.4 enhancement in the schema comments.
-      await prisma.revenueContract.update({
-        where: { id: contract.id },
-        data: { totalContractValue: adjusted.adjustedAmount.toFixed(4) },
-      });
-    }
+      if (contract && contract.performanceObligations.length > 0) {
+        const base = new Decimal(contract.totalContractValue.toString())
+          .minus(new Decimal(input.actualAmount));
+        const activeComponents = contract.variableConsiderations
+          .filter((c) => c.status === "ACTIVE")
+          .map((c) => toComponent(c as Parameters<typeof toComponent>[0]));
+        const adjusted = computeAdjustedTransactionPrice({
+          baseAmount: base.lessThan(0) ? 0 : base,
+          components: activeComponents,
+        });
+        // Note: we recompute against the original-base-minus-actual,
+        // which is an approximation — accurate when the resolved
+        // component was the only adjustment. Multiple-component
+        // contracts may need a stored "originalBase" field; tracked
+        // as a v0.4 enhancement in the schema comments.
+        await tx.revenueContract.update({
+          where: { id: contract.id },
+          data: { totalContractValue: adjusted.adjustedAmount.toFixed(4) },
+        });
+      }
+    });
 
     revalidatePath(`/contracts/${target.contractId}`);
     return {
@@ -715,7 +745,7 @@ export async function removeVariableConsiderationAction(
   input: RemoveVarConsInput
 ): Promise<VarConsActionResult> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     const target = await prisma.variableConsideration.findFirst({
@@ -748,10 +778,24 @@ export async function removeVariableConsiderationAction(
     });
     if (!reassessment.ok) return reassessment;
 
-    await prisma.variableConsideration.update({
-      where: { id: target.id },
-      data: { status: "REVERSED" },
-    });
+    // The reassess action above committed in its own transaction. If
+    // the status flip below fails, the component stays ACTIVE with
+    // currentConstrained = 0 — functionally inert (zero contribution
+    // to the adjusted transaction price) but mislabeled in the audit
+    // trail. Surface the half-success rather than swallow it.
+    try {
+      await prisma.variableConsideration.update({
+        where: { id: target.id },
+        data: { status: "REVERSED" },
+      });
+    } catch (e) {
+      return {
+        ok: false,
+        message: `Reassessment recorded (catch-up ${reassessment.catchUpAmount}) but status flip to REVERSED failed: ${e instanceof Error ? e.message : "unknown error"}. Re-run the reverse action to retry.`,
+        catchUpAmount: reassessment.catchUpAmount,
+        reassessmentId: reassessment.reassessmentId,
+      };
+    }
 
     revalidatePath(`/contracts/${target.contractId}`);
     return {

@@ -164,8 +164,9 @@ const ExtractionResponseSchema = z.object({
     ),
   variableConsideration: z
     .array(ExtractedVariableConsiderationSchema)
+    .default([])
     .describe(
-      "Every detected ASC 606 Step 3 variable consideration component. Empty array if the contract is fully fixed consideration."
+      "Every detected ASC 606 Step 3 variable consideration component. Empty array if the contract is fully fixed consideration. Default [] for backward-compat with AiExtractionSuggestion rows persisted before this field was added."
     ),
   notes: z
     .string()

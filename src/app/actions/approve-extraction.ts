@@ -89,7 +89,7 @@ export async function approveExtractionAction(
   input: ApproveInput
 ): Promise<ApproveState> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     // SECURITY (pen-test pass 4): tenant-scope the contract lookup.
@@ -249,7 +249,7 @@ export async function approveExtractionAction(
               // dedicated reassess action.)
               catchUpAmount: null,
               rationale: `AI extraction baseline: ${vc.constraintRationale}`,
-              reassessedBy: tenant.id,
+              reassessedBy: user.email,
             },
           });
           variableConsiderationCount += 1;
