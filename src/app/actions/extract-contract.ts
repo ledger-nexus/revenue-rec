@@ -87,10 +87,26 @@ export async function extractContractAction(
         contractId,
         tenantId: tenant.id,
         obligationsJson: result.extracted.performanceObligations as unknown as object,
+        // Persist the variable consideration components + their
+        // EXPECTED_VALUE outcomes (when present) so the audit panel
+        // can show what the AI proposed for ASC 606 Step 3, not just
+        // the obligations. Null when the array is empty (saves
+        // storage; the audit page treats empty + null the same).
+        variableConsiderationJson:
+          result.extracted.variableConsideration.length > 0
+            ? (result.extracted.variableConsideration as unknown as object)
+            : undefined,
         modelName: result.modelName,
         promptHash: result.promptHash,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
+        // Prompt-cache telemetry from the Anthropic SDK's usage
+        // response. cacheReadTokens > 0 means the system prefix was
+        // served from cache; cacheCreationTokens > 0 means the
+        // prefix was written this call (a cache miss that primed
+        // future calls).
+        cacheReadTokens: result.cacheReadTokens,
+        cacheCreationTokens: result.cacheCreationTokens,
         latencyMs: result.latencyMs,
       },
       select: { id: true },
