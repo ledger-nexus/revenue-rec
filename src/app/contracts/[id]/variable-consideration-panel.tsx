@@ -27,6 +27,7 @@ import {
   resolveVariableConsiderationAction,
   removeVariableConsiderationAction,
 } from "@/app/actions/variable-consideration";
+import { postVariableCatchUpAction } from "@/app/actions/post-variable-catch-up";
 
 interface VarConsRow {
   id: string;
@@ -40,7 +41,13 @@ interface VarConsRow {
   resolvedAmount: string | null;
   obligationLabel: string | null; // e.g., "PO #2 — Implementation services"
   reassessmentCount: number;
-  latestCatchUp: string | null;
+  /** Most recent reassessment summary — drives the post / posted-state UI. */
+  latestReassessment: {
+    id: string;
+    catchUpAmount: string | null;
+    posted: boolean;
+    postedAt: string | null;
+  } | null;
 }
 
 interface Props {
@@ -239,13 +246,10 @@ function RowDetail({
           </TD>
         </TR>
       ) : null}
-      {row.latestCatchUp ? (
+      {row.latestReassessment && row.latestReassessment.catchUpAmount ? (
         <TR>
-          <TD colSpan={7} className="bg-ink-50 text-[11px] text-ink-600">
-            Latest reassessment posted catch-up of{" "}
-            <span className="amount-cell">{row.latestCatchUp}</span>. (Posting via
-            the recognition bridge is a v0.4 follow-up — for now operators record
-            the catch-up amount and post a manual JE.)
+          <TD colSpan={7} className="bg-ink-50 text-[11px]">
+            <LatestReassessmentRow reassessment={row.latestReassessment} />
           </TD>
         </TR>
       ) : null}
@@ -454,8 +458,9 @@ function ReassessForm({ row, onClose }: { row: VarConsRow; onClose: () => void }
       {catchUp ? (
         <div className="rounded-md bg-emerald-50 p-2 text-xs text-emerald-800">
           Reassessment saved. Cumulative catch-up of{" "}
-          <span className="amount-cell">{catchUp}</span> recorded — post the catch-up JE
-          manually for now (auto-posting via bridge is a v0.4 follow-up).
+          <span className="amount-cell">{catchUp}</span> recorded. Close this
+          form and use the "Post catch-up JE" button on the component's row to
+          post via ledger-core.
         </div>
       ) : null}
       <div className="flex justify-end gap-2">
@@ -571,6 +576,97 @@ function ReverseButton({ id }: { id: string }) {
     <Button size="sm" variant="ghost" onClick={onClick} disabled={pending}>
       {pending ? "…" : "Reverse"}
     </Button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LatestReassessmentRow — surfaces the catch-up amount + post button or
+// posted-state badge per reassessment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function LatestReassessmentRow({
+  reassessment,
+}: {
+  reassessment: {
+    id: string;
+    catchUpAmount: string | null;
+    posted: boolean;
+    postedAt: string | null;
+  };
+}) {
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const amount = reassessment.catchUpAmount;
+  if (!amount) return null;
+  const amt = parseFloat(amount);
+  const isZero = amt === 0;
+
+  function onPost() {
+    setError(null);
+    setSuccess(null);
+    startTransition(async () => {
+      const result = await postVariableCatchUpAction({
+        reassessmentId: reassessment.id,
+      });
+      if (!result.ok) setError(result.message);
+      else setSuccess(result.message);
+    });
+  }
+
+  if (reassessment.posted) {
+    return (
+      <div className="flex items-center gap-2 text-ink-600">
+        <Badge tone="positive">POSTED</Badge>
+        <span>
+          Latest reassessment catch-up of{" "}
+          <span className="amount-cell">{formatMoney(amount)}</span> posted via
+          ledger-core
+          {reassessment.postedAt
+            ? ` at ${new Date(reassessment.postedAt).toLocaleString()}`
+            : ""}
+          .
+        </span>
+      </div>
+    );
+  }
+
+  if (isZero) {
+    return (
+      <div className="flex items-center gap-2 text-ink-500">
+        <Badge tone="neutral">NO POSTING NEEDED</Badge>
+        <span>Latest reassessment catch-up is $0.00 — nothing to post.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 text-ink-700">
+        <Badge tone="warning">UNPOSTED</Badge>
+        <span>
+          Latest reassessment catch-up of{" "}
+          <span className="amount-cell font-medium">{formatMoney(amount)}</span>
+          {amt > 0
+            ? " — recognizes additional revenue this period."
+            : " — reverses revenue this period."}
+        </span>
+        <Button size="sm" onClick={onPost} disabled={pending} className="ml-auto">
+          {pending ? "Posting…" : "Post catch-up JE"}
+        </Button>
+      </div>
+      {error ? (
+        <div className="rounded-md bg-rose-50 p-1.5 text-[11px] text-rose-800">
+          {error}
+        </div>
+      ) : null}
+      {success ? (
+        <div className="rounded-md bg-emerald-50 p-1.5 text-[11px] text-emerald-800">
+          {success}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

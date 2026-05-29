@@ -47,6 +47,7 @@
 
 import { revalidatePath } from "next/cache";
 import { Decimal } from "decimal.js";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { allocateTransactionPrice } from "@/lib/accounting/allocator";
 import {
@@ -348,6 +349,16 @@ export async function addVariableConsiderationAction(
           newConstrainedAmount: new Decimal(input.constrainedAmount).toFixed(4),
           newUnconstrainedAmount: new Decimal(input.unconstrainedAmount).toFixed(4),
           catchUpAmount: summary ? summary.catchUp.totalCatchUp.toFixed(4) : null,
+          // Per-PO breakdown frozen at reassessment time. On the
+          // initial baseline the catch-up is zero (no prior
+          // recognition to true up against) — store the breakdown
+          // anyway so the audit trail is consistent.
+          perObligationCatchUpJson: summary
+            ? summary.catchUp.perObligation.map((p) => ({
+                obligationId: p.id,
+                amount: p.catchUp.toFixed(4),
+              }))
+            : Prisma.JsonNull,
           rationale: input.constraintRationale,
           reassessedBy: tenant.id,
         },
@@ -550,6 +561,15 @@ export async function reassessVariableConsiderationAction(
           newConstrainedAmount: new Decimal(input.newConstrainedAmount).toFixed(4),
           newUnconstrainedAmount: new Decimal(input.newUnconstrainedAmount).toFixed(4),
           catchUpAmount: summary.catchUp.totalCatchUp.toFixed(4),
+          // Freeze the per-PO breakdown now — by the time the
+          // operator clicks "Post catch-up", each PO.ssp will have
+          // been updated to the NEW allocation (we do it below), so
+          // we can no longer derive the per-PO delta from current
+          // state.
+          perObligationCatchUpJson: summary.catchUp.perObligation.map((p) => ({
+            obligationId: p.id,
+            amount: p.catchUp.toFixed(4),
+          })),
           rationale: input.rationale,
           reassessedBy: tenant.id,
         },

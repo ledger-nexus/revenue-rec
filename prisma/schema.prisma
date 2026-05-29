@@ -486,9 +486,24 @@ model VariableConsiderationReassessment {
   /// reassessment. Positive = additional revenue recognized this
   /// period; negative = reversal. Null if reassessment was recorded
   /// but no JE was posted (e.g., contract not yet active).
-  catchUpAmount Decimal? @db.Decimal(18, 4)
+  catchUpAmount Decimal?  @db.Decimal(18, 4)
   /// FK to the catch-up JE (via RecognitionEvent) if one was posted.
-  postedEventId String?  @db.Uuid
+  postedEventId String?   @db.Uuid
+  /// When the catch-up JE was posted. Set alongside postedEventId.
+  postedAt      DateTime?
+
+  /// Per-PO catch-up breakdown frozen at reassessment time. JSON of
+  /// `Array<{ obligationId: string, amount: string }>` — amounts are
+  /// decimal-strings to preserve precision. Required by the
+  /// postVariableCatchUpAction because by the time the operator
+  /// clicks Post, each PO.ssp has already been updated to the NEW
+  /// allocation — we can no longer derive the per-PO delta from
+  /// current state.
+  ///
+  /// Null on initial reassessment baselines (no catch-up to post)
+  /// and on reassessments recorded without an allocator state
+  /// (contract not yet active, no POs).
+  perObligationCatchUpJson Json?
 
   rationale    String // Why the estimate changed
   reassessedAt DateTime @default(now())

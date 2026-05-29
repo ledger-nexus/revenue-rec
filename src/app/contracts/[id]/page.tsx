@@ -55,7 +55,12 @@ export default async function ContractDetailPage({
           reassessments: {
             orderBy: { reassessedAt: "desc" },
             take: 1,
-            select: { catchUpAmount: true },
+            select: {
+              id: true,
+              catchUpAmount: true,
+              postedEventId: true,
+              postedAt: true,
+            },
           },
           _count: { select: { reassessments: true } },
         },
@@ -261,10 +266,16 @@ export default async function ContractDetailPage({
                 ? `PO #${v.obligation.sequenceNo} — ${v.obligation.description}`
                 : null,
               reassessmentCount: v._count.reassessments,
-              latestCatchUp:
-                v.reassessments[0]?.catchUpAmount
-                  ? v.reassessments[0].catchUpAmount.toString()
-                  : null,
+              latestReassessment: v.reassessments[0]
+                ? {
+                    id: v.reassessments[0].id,
+                    catchUpAmount: v.reassessments[0].catchUpAmount
+                      ? v.reassessments[0].catchUpAmount.toString()
+                      : null,
+                    posted: v.reassessments[0].postedEventId != null,
+                    postedAt: v.reassessments[0].postedAt?.toISOString() ?? null,
+                  }
+                : null,
             }))}
           />
         </CardContent>
