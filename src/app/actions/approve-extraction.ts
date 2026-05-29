@@ -69,6 +69,16 @@ export interface ApproveInput {
     unconstrainedAmount: number;
     constrainedAmount: number;
     constraintRationale: string;
+    // Optional probability-weighted scenarios. Populated only for
+    // EXPECTED_VALUE method; the math module validates probabilities
+    // sum to ~100% when present. Persisted as
+    // VariableConsiderationOutcome rows so the auditor sees the math
+    // behind the unconstrained estimate.
+    outcomes?: Array<{
+      scenario: string;
+      amount: number;
+      probabilityPercent: number;
+    }>;
   }>;
   // Caller may also adjust the contract's total + dates if the AI got
   // them wrong. All optional — falls back to existing contract values.
@@ -232,6 +242,21 @@ export async function approveExtractionAction(
             },
             select: { id: true },
           });
+          // EXPECTED_VALUE outcomes — persist when the AI emitted
+          // them (or when an operator-typed proposal includes them).
+          // Only meaningful for method=EXPECTED_VALUE; we don't filter
+          // by method here because the schema accepts outcomes for
+          // either method and the math layer is permissive.
+          if (vc.outcomes && vc.outcomes.length > 0) {
+            await tx.variableConsiderationOutcome.createMany({
+              data: vc.outcomes.map((o) => ({
+                variableConsiderationId: created.id,
+                scenario: o.scenario,
+                amount: new Decimal(o.amount).toFixed(4),
+                probabilityPercent: new Decimal(o.probabilityPercent).toFixed(4),
+              })),
+            });
+          }
           // Initial baseline reassessment row — the audit anchor for
           // this component's history. Matches the pattern
           // addVariableConsiderationAction creates for operator-typed

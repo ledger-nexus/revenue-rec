@@ -97,6 +97,30 @@ const ExtractedPoSchema = z.object({
 // extractor. The reviewer can edit/reject before approval; on approve
 // the deterministic engine creates a corresponding VariableConsideration
 // row + initial reassessment baseline.
+// One probability-weighted scenario for the EXPECTED_VALUE method.
+// The AI surfaces these so the operator + auditor can see the math
+// behind the unconstrained estimate rather than a single opaque number.
+const ExtractedOutcomeSchema = z.object({
+  scenario: z
+    .string()
+    .max(200)
+    .describe(
+      "Short label for this outcome. E.g. 'Customer hits 80% of volume target', 'Q4 milestone delivered on time'."
+    ),
+  amount: z
+    .number()
+    .describe(
+      "Dollar amount the variable consideration would land at under this scenario. Signed per the parent component's direction (the math layer applies the sign)."
+    ),
+  probabilityPercent: z
+    .number()
+    .min(0)
+    .max(100)
+    .describe(
+      "Probability of this scenario, 0..100. Across all outcomes for one component the values MUST sum to 100 (we allow 99.5–100.5 to absorb rounding)."
+    ),
+});
+
 const ExtractedVariableConsiderationSchema = z.object({
   description: z
     .string()
@@ -117,7 +141,7 @@ const ExtractedVariableConsiderationSchema = z.object({
     .number()
     .min(0)
     .describe(
-      "Best-estimate variable amount before applying the ASC 606-10-32-11 constraint. Always >= 0."
+      "Best-estimate variable amount before applying the ASC 606-10-32-11 constraint. Always >= 0. For EXPECTED_VALUE method this should equal the probability-weighted sum of `outcomes`."
     ),
   constrainedAmount: z
     .number()
@@ -130,6 +154,12 @@ const ExtractedVariableConsiderationSchema = z.object({
     .max(400)
     .describe(
       "Auditor-facing reasoning: what would cause a significant reversal, why constrained at this level. One to three sentences, concrete."
+    ),
+  outcomes: z
+    .array(ExtractedOutcomeSchema)
+    .default([])
+    .describe(
+      "Probability-weighted scenarios — REQUIRED when method=EXPECTED_VALUE so the auditor sees the math behind unconstrainedAmount. Omit (empty array) for MOST_LIKELY_AMOUNT. Probabilities across outcomes must sum to ~100% (we accept 99.5–100.5)."
     ),
 });
 
@@ -177,6 +207,7 @@ const ExtractionResponseSchema = z.object({
 });
 
 export type ExtractedPo = z.infer<typeof ExtractedPoSchema>;
+export type ExtractedOutcome = z.infer<typeof ExtractedOutcomeSchema>;
 export type ExtractedVariableConsideration = z.infer<
   typeof ExtractedVariableConsiderationSchema
 >;
@@ -222,6 +253,13 @@ If the contract carries variable consideration — volume rebates, performance b
 - **unconstrainedAmount**: your best estimate of what this component is worth, IGNORING the constraint. For most-likely: the single most likely outcome. For expected value: the probability-weighted mean.
 - **constrainedAmount**: what the engine should include in the transaction price after applying ASC 606-10-32-11. The constraint says "include the amount only to the extent it's PROBABLE a significant reversal won't occur." Translate that to a number: typically a fraction of the unconstrained estimate. If you're highly confident the unconstrained will materialize, constrained = unconstrained. If you're meaningfully uncertain, constrained < unconstrained. The reviewer often adjusts this.
 - **constraintRationale**: explain in 1-3 sentences WHY constrained < unconstrained (what could cause a reversal) or why they're equal (why a reversal is improbable). The auditor reads this verbatim.
+- **outcomes**: REQUIRED when method=EXPECTED_VALUE — emit 2-5 distinct probability-weighted scenarios that show your math. Each outcome: short scenario label, dollar amount under that scenario, probability percent. Probabilities MUST sum to 100. The unconstrainedAmount you give above should equal the probability-weighted sum (Σ amount × probability/100). For MOST_LIKELY_AMOUNT method, leave outcomes empty — the single most-likely outcome is captured by unconstrainedAmount alone.
+
+  Example outcomes for a "Q4 volume rebate" with EXPECTED_VALUE method:
+    {scenario: "Customer misses target (no rebate)", amount: 0, probabilityPercent: 25}
+    {scenario: "Customer hits 80% of target (partial rebate)", amount: 3000, probabilityPercent: 50}
+    {scenario: "Customer exceeds target (full rebate)", amount: 6000, probabilityPercent: 25}
+  → unconstrainedAmount = 0×0.25 + 3000×0.50 + 6000×0.25 = 3000
 
 If the contract is fully fixed consideration, return an empty variableConsideration array. Don't fabricate components.
 

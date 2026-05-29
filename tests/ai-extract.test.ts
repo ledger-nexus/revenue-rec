@@ -71,6 +71,12 @@ const samplePayloadWithVC = {
       constrainedAmount: 2500,
       constraintRationale:
         "Customer historically hits 60-80% of volume targets. Constrained to the lower bound of the expected range — a higher figure would risk significant reversal if Q4 underperforms.",
+      // EXPECTED_VALUE outcomes — 25/50/25 split summing to $4k mean.
+      outcomes: [
+        { scenario: "Customer misses target (no rebate)", amount: 0, probabilityPercent: 25 },
+        { scenario: "Customer hits 80% of target", amount: 4000, probabilityPercent: 50 },
+        { scenario: "Customer exceeds target (full rebate)", amount: 8000, probabilityPercent: 25 },
+      ],
     },
     {
       description: "Implementation bonus for on-time go-live",
@@ -80,6 +86,8 @@ const samplePayloadWithVC = {
       constrainedAmount: 0,
       constraintRationale:
         "Bonus contingent on a specific milestone; reviewer should add as the project nears completion. Excluded from initial transaction price (constrained = 0) to avoid a reversal.",
+      // MOST_LIKELY_AMOUNT — no outcomes needed.
+      outcomes: [],
     },
   ],
 };
@@ -193,6 +201,59 @@ describe("extractContract", () => {
     setClientForTesting(makeMockClient(samplePayload));
     const r = await extractContract(sampleContract);
     expect(r.extracted.variableConsideration).toEqual([]);
+  });
+
+  it("parses EXPECTED_VALUE outcomes (probability-weighted scenarios)", async () => {
+    setClientForTesting(makeMockClient(samplePayloadWithVC));
+    const r = await extractContract(sampleContract);
+    const expectedValueVc = r.extracted.variableConsideration.find(
+      (v) => v.method === "EXPECTED_VALUE"
+    )!;
+    expect(expectedValueVc.outcomes).toHaveLength(3);
+    expect(expectedValueVc.outcomes[0].scenario).toContain("misses");
+    expect(expectedValueVc.outcomes[0].probabilityPercent).toBe(25);
+    expect(expectedValueVc.outcomes[2].amount).toBe(8000);
+    // Verify probabilities sum to 100
+    const totalProb = expectedValueVc.outcomes.reduce(
+      (acc, o) => acc + o.probabilityPercent,
+      0
+    );
+    expect(totalProb).toBe(100);
+  });
+
+  it("MOST_LIKELY_AMOUNT components have empty outcomes array", async () => {
+    setClientForTesting(makeMockClient(samplePayloadWithVC));
+    const r = await extractContract(sampleContract);
+    const mostLikelyVc = r.extracted.variableConsideration.find(
+      (v) => v.method === "MOST_LIKELY_AMOUNT"
+    )!;
+    expect(mostLikelyVc.outcomes).toEqual([]);
+  });
+
+  it("preserves outcomes when the model emits them for MOST_LIKELY_AMOUNT components too", async () => {
+    // Schema accepts outcomes for either method; the math layer is
+    // permissive. Verify the field round-trips even when method is
+    // MOST_LIKELY_AMOUNT.
+    const payload = {
+      ...samplePayload,
+      variableConsideration: [
+        {
+          description: "Bonus with documented outcomes",
+          method: "MOST_LIKELY_AMOUNT",
+          direction: "INCREASE",
+          unconstrainedAmount: 1000,
+          constrainedAmount: 500,
+          constraintRationale: "Conservative cap.",
+          outcomes: [
+            { scenario: "Paid", amount: 1000, probabilityPercent: 60 },
+            { scenario: "Not paid", amount: 0, probabilityPercent: 40 },
+          ],
+        },
+      ],
+    };
+    setClientForTesting(makeMockClient(payload));
+    const r = await extractContract(sampleContract);
+    expect(r.extracted.variableConsideration[0].outcomes).toHaveLength(2);
   });
 
   it("throws when the model returns no parsed_output", async () => {

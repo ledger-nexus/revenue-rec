@@ -98,6 +98,13 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
           unconstrainedAmount: vc.unconstrainedAmount,
           constrainedAmount: vc.constrainedAmount,
           constraintRationale: vc.constraintRationale,
+          outcomes: vc.outcomes && vc.outcomes.length > 0
+            ? vc.outcomes.map((o) => ({
+                scenario: o.scenario,
+                amount: o.amount,
+                probabilityPercent: o.probabilityPercent,
+              }))
+            : undefined,
         })),
         totalContractValue: proposal.totalContractValue,
         contractStartDate: proposal.contractStartDate,
@@ -245,6 +252,87 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
                   ))}
                 </ul>
               </details>
+              {/* EXPECTED_VALUE outcomes — show the math behind
+                  unconstrainedAmount when the AI provided it. */}
+              {proposal.variableConsideration.some(
+                (vc) => vc.outcomes && vc.outcomes.length > 0
+              ) ? (
+                <details className="mt-1 text-[11px] text-ink-600">
+                  <summary className="cursor-pointer">
+                    Expected-value scenarios
+                  </summary>
+                  <div className="mt-1 flex flex-col gap-1.5">
+                    {proposal.variableConsideration
+                      .filter((vc) => vc.outcomes && vc.outcomes.length > 0)
+                      .map((vc, i) => {
+                        const weighted = vc.outcomes!.reduce(
+                          (acc, o) => acc + o.amount * (o.probabilityPercent / 100),
+                          0
+                        );
+                        return (
+                          <div key={i} className="rounded border border-ink-200 bg-white p-1.5">
+                            <div className="font-medium text-ink-700">
+                              {vc.description}
+                            </div>
+                            <table className="mt-0.5 w-full text-[10px]">
+                              <thead className="text-ink-500">
+                                <tr>
+                                  <th className="px-1 text-left">Scenario</th>
+                                  <th className="px-1 text-right">Prob</th>
+                                  <th className="px-1 text-right">Amount</th>
+                                  <th className="px-1 text-right">Contribution</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {vc.outcomes!.map((o, j) => (
+                                  <tr key={j} className="border-t border-ink-100">
+                                    <td className="px-1 py-0.5">{o.scenario}</td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {o.probabilityPercent.toFixed(1)}%
+                                    </td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {o.amount.toLocaleString("en-US", {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}
+                                    </td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {(
+                                        o.amount * (o.probabilityPercent / 100)
+                                      ).toLocaleString("en-US", {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}
+                                    </td>
+                                  </tr>
+                                ))}
+                                <tr className="border-t border-ink-200 bg-ink-50">
+                                  <td className="px-1 py-0.5 font-medium" colSpan={3}>
+                                    Σ contributions = expected value
+                                  </td>
+                                  <td className="px-1 py-0.5 text-right amount-cell font-medium">
+                                    {weighted.toLocaleString("en-US", {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                            {Math.abs(weighted - vc.unconstrainedAmount) > 0.5 ? (
+                              <div className="mt-0.5 text-[10px] text-amber-700">
+                                ⚠ AI's unconstrainedAmount (
+                                {vc.unconstrainedAmount.toFixed(2)}) doesn't
+                                match Σ contributions ({weighted.toFixed(2)}).
+                                Reviewer should reconcile before approving.
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                  </div>
+                </details>
+              ) : null}
             </div>
           ) : null}
           <details className="text-xs text-ink-600">
