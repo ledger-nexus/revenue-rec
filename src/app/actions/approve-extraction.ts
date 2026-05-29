@@ -282,10 +282,16 @@ export async function approveExtractionAction(
       }
 
       // Update contract metadata in case dates / total changed.
+      // Stamp originalBaseAmount with the pre-VC baseTotal (NOT the
+      // adjusted `total` going into totalContractValue) so subsequent
+      // reassess/resolve actions have a stable anchor for the recompute
+      // math. Without this, multi-component contracts hit an
+      // approximation flagged in the audit-pass.
       await tx.revenueContract.update({
         where: { id: contract.id },
         data: {
           totalContractValue: total.toFixed(4),
+          originalBaseAmount: baseTotal.toFixed(4),
           contractStartDate: startDate,
           contractEndDate: endDate,
           status: "ACTIVE",

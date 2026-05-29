@@ -176,6 +176,19 @@ model RevenueContract {
   contractStartDate  DateTime              @db.Date
   contractEndDate    DateTime?             @db.Date
   totalContractValue Decimal               @db.Decimal(18, 4)
+  // The contract's stated price BEFORE any variable consideration
+  // adjustments. Distinct from totalContractValue, which is the
+  // running adjusted price (= originalBaseAmount + Σ active VC).
+  // Set once at approval time; never updated by reassess/resolve so
+  // the recompute math has a stable anchor.
+  //
+  // Nullable for back-compat with contracts created before this
+  // column existed. The action wrappers fall back to deriving the
+  // base from (totalContractValue − Σ active VC) when null — works
+  // correctly when there's a single VC component or none, but
+  // multi-component contracts get this stamped explicitly to avoid
+  // the approximation noted in audit-pass.
+  originalBaseAmount Decimal?              @db.Decimal(18, 4)
   currencyId         String
   status             RevenueContractStatus @default(ACTIVE)
 

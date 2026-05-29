@@ -138,6 +138,7 @@ async function loadContractState(
     select: {
       id: true,
       totalContractValue: true,
+      originalBaseAmount: true,
       performanceObligations: {
         select: {
           id: true,
@@ -165,6 +166,60 @@ async function loadContractState(
     },
   });
   return contract;
+}
+
+/**
+ * Resolve the contract's "base amount" — the price BEFORE any variable
+ * consideration adjustment. The math layer (allocateWithVariableConsideration,
+ * computeAdjustedTransactionPrice) expects baseAmount as the pre-VC value
+ * and layers VC adjustments on top.
+ *
+ * Precedence:
+ *
+ *   1. Stored `originalBaseAmount` — the canonical source, stamped by
+ *      approveExtractionAction at contract approval time. Stable
+ *      across all reassess/resolve cycles.
+ *
+ *   2. Back-derive from totalContractValue minus current ACTIVE VC
+ *      adjustments. Used for contracts created before
+ *      originalBaseAmount existed (the column was added in v0.5).
+ *      Accurate when the back-derivation has no rounding drift
+ *      (single-component contracts are fine; multi-component
+ *      legacy ones may drift by pennies).
+ *
+ * After a successful reassess the back-derivation will produce a
+ * stale value (totalContractValue updates while
+ * originalBaseAmount stays null). For that reason: ON FIRST USE for
+ * a legacy contract, the caller should ALSO persist the derived
+ * originalBaseAmount so subsequent calls hit precedence rule 1.
+ */
+function getEffectiveBaseAmount(contract: {
+  totalContractValue: { toString(): string };
+  originalBaseAmount: { toString(): string } | null;
+  variableConsiderations: Array<{
+    direction: VariableConsiderationDirection;
+    status: "ACTIVE" | "RESOLVED" | "REVERSED";
+    currentConstrainedAmount: { toString(): string };
+  }>;
+}): { baseAmount: Decimal; wasBackDerived: boolean } {
+  if (contract.originalBaseAmount != null) {
+    return {
+      baseAmount: new Decimal(contract.originalBaseAmount.toString()),
+      wasBackDerived: false,
+    };
+  }
+  const total = new Decimal(contract.totalContractValue.toString());
+  let signedAdjustment = new Decimal(0);
+  for (const vc of contract.variableConsiderations) {
+    if (vc.status !== "ACTIVE") continue;
+    const constrained = new Decimal(vc.currentConstrainedAmount.toString());
+    const signed = vc.direction === "INCREASE" ? constrained : constrained.negated();
+    signedAdjustment = signedAdjustment.plus(signed);
+  }
+  return {
+    baseAmount: total.minus(signedAdjustment),
+    wasBackDerived: true,
+  };
 }
 
 /**
@@ -303,7 +358,12 @@ export async function addVariableConsiderationAction(
       }
     }
 
-    const base = new Decimal(contract.totalContractValue.toString());
+    // baseAmount is the pre-VC contract price. Stored originalBaseAmount
+    // is the canonical source; legacy contracts back-derive from
+    // (totalContractValue − Σ active VC). The math layer needs the
+    // pre-VC value; totalContractValue carries cumulative adjustments.
+    const baseInfo = getEffectiveBaseAmount(contract);
+    const base = baseInfo.baseAmount;
     const oldComponents = contract.variableConsiderations
       .filter((c) => c.status === "ACTIVE")
       .map((c) => toComponent(c as Parameters<typeof toComponent>[0]));
@@ -338,6 +398,16 @@ export async function addVariableConsiderationAction(
       : null;
 
     const result = await prisma.$transaction(async (tx) => {
+      // Persist the back-derived baseAmount as originalBaseAmount on
+      // legacy contracts so the next reassess/resolve hits the stored
+      // path instead of re-deriving. No-op if already set.
+      if (baseInfo.wasBackDerived) {
+        await tx.revenueContract.update({
+          where: { id: contract.id },
+          data: { originalBaseAmount: base.toFixed(4) },
+        });
+      }
+
       const created = await tx.variableConsideration.create({
         data: {
           contractId: contract.id,
@@ -449,7 +519,11 @@ export async function reassessVariableConsiderationAction(
     const contract = await loadContractState(prisma, target.contractId, tenant.id);
     if (!contract) return { ok: false, message: "Parent contract not found" };
 
-    const base = new Decimal(contract.totalContractValue.toString());
+    // Pre-VC base. Stored originalBaseAmount is the canonical source;
+    // legacy contracts back-derive (and the persist below stamps it
+    // so the next reassess hits the stored path).
+    const baseInfo = getEffectiveBaseAmount(contract);
+    const base = baseInfo.baseAmount;
 
     // Build old and new component lists. The reassessed row swaps in
     // the new amounts; all other ACTIVE components stay as they are.
@@ -612,10 +686,16 @@ export async function reassessVariableConsiderationAction(
       // Update the parent contract's totalContractValue so downstream
       // recognition (post-recognition action, allocator re-runs) uses
       // the adjusted price. This is the "live" transaction price.
+      // Also stamp originalBaseAmount if it was back-derived (first
+      // time this legacy contract sees a reassess after the column
+      // was added) so subsequent calls use the stored value.
       await tx.revenueContract.update({
         where: { id: contract.id },
         data: {
           totalContractValue: summary.newAdjusted.adjustedAmount.toFixed(4),
+          ...(baseInfo.wasBackDerived
+            ? { originalBaseAmount: base.toFixed(4) }
+            : {}),
         },
       });
 
@@ -717,6 +797,7 @@ export async function resolveVariableConsiderationAction(
         select: {
           id: true,
           totalContractValue: true,
+          originalBaseAmount: true,
           performanceObligations: { select: { id: true } },
           variableConsiderations: {
             where: { status: { not: "REVERSED" } },
@@ -733,8 +814,18 @@ export async function resolveVariableConsiderationAction(
         },
       });
       if (contract && contract.performanceObligations.length > 0) {
-        const base = new Decimal(contract.totalContractValue.toString())
-          .minus(new Decimal(input.actualAmount));
+        // Audit-pass fix: use stored originalBaseAmount as the true
+        // pre-VC base instead of the previous approximation
+        // (totalContractValue − actualAmount), which was only correct
+        // when the resolved component was the only adjustment.
+        // Multi-component contracts now compute correctly.
+        //
+        // Inside this transaction the just-resolved VC component is
+        // already flipped to RESOLVED (status update committed earlier
+        // in this tx), so activeComponents.filter ACTIVE excludes it
+        // automatically.
+        const baseInfo = getEffectiveBaseAmount(contract);
+        const base = baseInfo.baseAmount;
         const activeComponents = contract.variableConsiderations
           .filter((c) => c.status === "ACTIVE")
           .map((c) => toComponent(c as Parameters<typeof toComponent>[0]));
@@ -742,14 +833,17 @@ export async function resolveVariableConsiderationAction(
           baseAmount: base.lessThan(0) ? 0 : base,
           components: activeComponents,
         });
-        // Note: we recompute against the original-base-minus-actual,
-        // which is an approximation — accurate when the resolved
-        // component was the only adjustment. Multiple-component
-        // contracts may need a stored "originalBase" field; tracked
-        // as a v0.4 enhancement in the schema comments.
         await tx.revenueContract.update({
           where: { id: contract.id },
-          data: { totalContractValue: adjusted.adjustedAmount.toFixed(4) },
+          data: {
+            totalContractValue: adjusted.adjustedAmount.toFixed(4),
+            // Stamp originalBaseAmount if it was back-derived
+            // (legacy contract; this is the first time we've
+            // computed it).
+            ...(baseInfo.wasBackDerived
+              ? { originalBaseAmount: base.toFixed(4) }
+              : {}),
+          },
         });
       }
     });
