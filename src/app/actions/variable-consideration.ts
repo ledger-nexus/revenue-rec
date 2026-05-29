@@ -49,8 +49,8 @@ import { revalidatePath } from "next/cache";
 import { Decimal } from "decimal.js";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { allocateTransactionPrice } from "@/lib/accounting/allocator";
 import {
+  allocateWithVariableConsideration,
   computeAdjustedTransactionPrice,
   computeReassessmentCatchUp,
   validateConstraint,
@@ -157,6 +157,9 @@ async function loadContractState(
           status: true,
           currentConstrainedAmount: true,
           currentUnconstrainedAmount: true,
+          // ASC 606-10-32-39 per-PO targeting. Threading this through
+          // the math via toComponent so the allocator honors it.
+          obligationId: true,
         },
       },
     },
@@ -177,6 +180,8 @@ function toComponent(
     status: "ACTIVE" | "RESOLVED" | "REVERSED";
     currentConstrainedAmount: { toString(): string } | Decimal;
     currentUnconstrainedAmount: { toString(): string } | Decimal;
+    /** Per-PO targeting per ASC 606-10-32-39. Null = contract-wide. */
+    obligationId?: string | null;
   }
 ): VariableConsiderationComponent {
   return {
@@ -187,6 +192,7 @@ function toComponent(
     status: c.status,
     constrainedAmount: c.currentConstrainedAmount.toString(),
     unconstrainedAmount: c.currentUnconstrainedAmount.toString(),
+    targetObligationId: c.obligationId ?? null,
   };
 }
 
@@ -208,46 +214,64 @@ function computeCatchUpForReallocation(input: {
     recognizedToDate: Decimal;
   }>;
 }) {
-  const oldAdjusted = computeAdjustedTransactionPrice({
+  // ASC 606-10-32-39 compliance: use the per-PO-aware allocator so
+  // targeted variable consideration (refund rights on one PO, on-time
+  // bonuses tied to one PO, etc.) lands entirely on the targeted PO
+  // instead of distributing proportionally. The function handles both
+  // the contract-wide and per-PO cases uniformly — components with no
+  // targetObligationId flow through the SSP allocator; components
+  // with one go directly to that PO.
+  const oldAlloc = allocateWithVariableConsideration({
     baseAmount: input.base,
+    pos: input.pos,
     components: input.oldComponents,
   });
-  const newAdjusted = computeAdjustedTransactionPrice({
+  const newAlloc = allocateWithVariableConsideration({
     baseAmount: input.base,
+    pos: input.pos,
     components: input.newComponents,
   });
 
-  // Re-allocate at both prices to find each PO's old + new allocation.
-  const oldAlloc = allocateTransactionPrice({
-    totalContractValue: oldAdjusted.adjustedAmount,
-    performanceObligations: input.pos.map((p) => ({
-      sequenceNo: p.sequenceNo,
-      description: p.description,
-      ssp: p.ssp,
-    })),
-  });
-  const newAlloc = allocateTransactionPrice({
-    totalContractValue: newAdjusted.adjustedAmount,
-    performanceObligations: input.pos.map((p) => ({
-      sequenceNo: p.sequenceNo,
-      description: p.description,
-      ssp: p.ssp,
-    })),
-  });
-
-  const oldBySeq = new Map(oldAlloc.map((a) => [a.sequenceNo, a.allocatedAmount]));
-  const newBySeq = new Map(newAlloc.map((a) => [a.sequenceNo, a.allocatedAmount]));
+  const oldById = new Map(oldAlloc.perObligation.map((a) => [a.id, a.allocated]));
+  const newById = new Map(newAlloc.perObligation.map((a) => [a.id, a.allocated]));
 
   const catchUp = computeReassessmentCatchUp({
     obligations: input.pos.map((p) => ({
       id: p.id,
-      oldAllocated: oldBySeq.get(p.sequenceNo) ?? new Decimal(0),
-      newAllocated: newBySeq.get(p.sequenceNo) ?? new Decimal(0),
+      oldAllocated: oldById.get(p.id) ?? new Decimal(0),
+      newAllocated: newById.get(p.id) ?? new Decimal(0),
       recognizedToDate: p.recognizedToDate,
     })),
   });
 
-  return { oldAdjusted, newAdjusted, oldAlloc, newAlloc, catchUp };
+  // For consumers expecting the old shape, expose the adjusted price
+  // from the new allocation result (totalAdjustedPrice = base + Σ all
+  // signed adjustments, including per-PO targeted).
+  //
+  // The per-row shape includes both `allocatedAmount` (total =
+  // contract-wide + targeted) and `contractWideAllocatedAmount`
+  // (the pre-targeted slice). Callers that store PO.ssp use the
+  // contract-wide-only slice to avoid baking targeted amounts into
+  // the SSP column.
+  return {
+    oldAdjusted: {
+      adjustedAmount: oldAlloc.totalAdjustedPrice,
+    },
+    newAdjusted: {
+      adjustedAmount: newAlloc.totalAdjustedPrice,
+    },
+    oldAlloc: oldAlloc.perObligation.map((p) => ({
+      sequenceNo: p.sequenceNo,
+      allocatedAmount: p.allocated,
+      contractWideAllocatedAmount: p.contractWideAllocated,
+    })),
+    newAlloc: newAlloc.perObligation.map((p) => ({
+      sequenceNo: p.sequenceNo,
+      allocatedAmount: p.allocated,
+      contractWideAllocatedAmount: p.contractWideAllocated,
+    })),
+    catchUp,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -520,16 +544,25 @@ export async function reassessVariableConsiderationAction(
       // Update PO ssp to reflect the new allocated amount. This keeps
       // the contract's allocation in sync with the new transaction
       // price; otherwise the next post-recognition would still use the
-      // old allocation. The math module ensures Σ(newAllocated) =
-      // adjusted transaction price exactly.
+      // old allocation.
+      //
+      // ASC 606-10-32-39 note: when storing the post-allocator amount
+      // as PO.ssp we use the contract-wide portion ONLY (excluding
+      // per-PO targeted adjustments). The targeted amounts come from
+      // the VC components' obligationId field at compute time, so we
+      // don't want to bake them into PO.ssp where they'd be re-applied
+      // on the next reassessment.
       for (const perPo of summary.catchUp.perObligation) {
-        const newAllocated = summary.newAlloc.find(
+        const newAllocatedRow = summary.newAlloc.find(
           (a) => a.sequenceNo === pos.find((p) => p.id === perPo.id)!.sequenceNo
         )!;
         await tx.performanceObligation.update({
           where: { id: perPo.id },
           data: {
-            ssp: newAllocated.allocatedAmount.toFixed(4),
+            // Store the contract-wide allocation slice — pre-targeted.
+            // The per-PO targeted layering happens at compute time
+            // from VC.obligationId.
+            ssp: newAllocatedRow.contractWideAllocatedAmount.toFixed(4),
             // recognizedToDate is updated when the catch-up JE posts,
             // NOT here. The reassessment records the intent; the
             // posting realizes it.

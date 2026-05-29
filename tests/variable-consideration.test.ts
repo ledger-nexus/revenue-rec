@@ -15,8 +15,10 @@ import {
   computeAdjustedTransactionPrice,
   computeReassessmentCatchUp,
   summarizeReassessment,
+  allocateWithVariableConsideration,
   VariableConsiderationError,
   type VariableConsiderationComponent,
+  type PerformanceObligationForAllocation,
 } from "../src/lib/accounting/variable-consideration";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -434,5 +436,281 @@ describe("summarizeReassessment", () => {
     expect(r.newAdjusted.adjustedAmount.toFixed(2)).toBe("100000.00");
     // delta = -20k, progress = 0.5 → catch-up = -10k
     expect(r.catchUp.totalCatchUp.toFixed(2)).toBe("-10000.00");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// allocateWithVariableConsideration (ASC 606-10-32-39 per-PO targeting)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function po(
+  over: Partial<PerformanceObligationForAllocation> = {}
+): PerformanceObligationForAllocation {
+  return {
+    id: over.id ?? "po-1",
+    sequenceNo: over.sequenceNo ?? 1,
+    description: over.description ?? "Test PO",
+    ssp: over.ssp ?? 1000,
+  };
+}
+
+describe("allocateWithVariableConsideration — no VC components", () => {
+  it("falls back to plain SSP allocation when there are no VC components", () => {
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+      ],
+      components: [],
+    });
+    expect(r.contractWidePrice.toFixed(2)).toBe("100000.00");
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("100000.00");
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("60000.00");
+    expect(r.perObligation[1].allocated.toFixed(2)).toBe("40000.00");
+  });
+});
+
+describe("allocateWithVariableConsideration — contract-wide VC only", () => {
+  it("distributes contract-wide adjustment by SSP", () => {
+    // Base $100k + $20k bonus → $120k allocated 60/40.
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+      ],
+      components: [
+        comp("Bonus", "INCREASE", 20_000),
+      ],
+    });
+    expect(r.contractWidePrice.toFixed(2)).toBe("120000.00");
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("120000.00");
+    // 60% × 120k = 72k, 40% × 120k = 48k
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("72000.00");
+    expect(r.perObligation[1].allocated.toFixed(2)).toBe("48000.00");
+    // Targeted is zero for both
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("0.00");
+  });
+});
+
+describe("allocateWithVariableConsideration — per-PO targeted VC", () => {
+  it("lands a per-PO targeted bonus entirely on the targeted PO", () => {
+    // ASC 606-10-32-39: bonus tied to PO-2 (implementation) shouldn't
+    // distribute to PO-1 (subscription).
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+      ],
+      components: [
+        {
+          ...comp("On-time delivery bonus", "INCREASE", 5_000),
+          targetObligationId: "po-2",
+        },
+      ],
+    });
+    // Contract-wide stream: base 100k, no contract-wide adjustments
+    expect(r.contractWidePrice.toFixed(2)).toBe("100000.00");
+    // PO-1: 60k (unchanged); PO-2: 40k + 5k targeted = 45k
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("60000.00");
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("0.00");
+    expect(r.perObligation[1].allocated.toFixed(2)).toBe("45000.00");
+    expect(r.perObligation[1].targetedAdjustment.toFixed(2)).toBe("5000.00");
+    // Total = 105k
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("105000.00");
+  });
+
+  it("lands a per-PO targeted refund as a negative on the targeted PO", () => {
+    // Refund right on PO-2 (implementation services). 30-day money-back
+    // window, estimate $3k of returns. constrained = 1.5k.
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+      ],
+      components: [
+        {
+          ...comp("Implementation refund right", "DECREASE", 1_500),
+          targetObligationId: "po-2",
+        },
+      ],
+    });
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("60000.00");
+    expect(r.perObligation[1].allocated.toFixed(2)).toBe("38500.00");
+    expect(r.perObligation[1].targetedAdjustment.toFixed(2)).toBe("-1500.00");
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("98500.00");
+  });
+
+  it("sums multiple targeted components to the same PO", () => {
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [po({ id: "po-1", sequenceNo: 1, ssp: 100_000 })],
+      components: [
+        { ...comp("Bonus A", "INCREASE", 2_000), targetObligationId: "po-1" },
+        { ...comp("Bonus B", "INCREASE", 3_000), targetObligationId: "po-1" },
+        { ...comp("Refund", "DECREASE", 1_000), targetObligationId: "po-1" },
+      ],
+    });
+    // Net targeted = +2k +3k -1k = +4k
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("4000.00");
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("104000.00");
+  });
+});
+
+describe("allocateWithVariableConsideration — mixed contract-wide + per-PO", () => {
+  it("layers per-PO targeting on top of contract-wide distribution", () => {
+    // Base 100k + 10k contract-wide bonus → 110k allocated 60/40.
+    // Plus 5k targeted to PO-2.
+    // Expected: PO-1 = 66k (60% × 110k), PO-2 = 44k + 5k = 49k.
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+      ],
+      components: [
+        comp("Contract-wide bonus", "INCREASE", 10_000),
+        {
+          ...comp("PO-2 delivery bonus", "INCREASE", 5_000),
+          targetObligationId: "po-2",
+        },
+      ],
+    });
+    expect(r.contractWidePrice.toFixed(2)).toBe("110000.00");
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("66000.00");
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("0.00");
+    expect(r.perObligation[1].allocated.toFixed(2)).toBe("49000.00");
+    expect(r.perObligation[1].targetedAdjustment.toFixed(2)).toBe("5000.00");
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("115000.00");
+  });
+
+  it("Σ allocated equals base + Σ all signed adjustments exactly", () => {
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 30_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+        po({ id: "po-3", sequenceNo: 3, ssp: 30_000 }),
+      ],
+      components: [
+        comp("Contract bonus", "INCREASE", 7_000),
+        { ...comp("PO-1 refund", "DECREASE", 500), targetObligationId: "po-1" },
+        { ...comp("PO-2 bonus", "INCREASE", 2_500), targetObligationId: "po-2" },
+      ],
+    });
+    // Net signed = +7k -500 +2.5k = +9k
+    expect(r.totalAdjustedPrice.toFixed(2)).toBe("109000.00");
+    const sum = r.perObligation.reduce(
+      (acc, p) => acc.plus(p.allocated),
+      new Decimal(0)
+    );
+    expect(sum.toFixed(2)).toBe("109000.00");
+  });
+});
+
+describe("allocateWithVariableConsideration — rejection cases", () => {
+  it("rejects a target obligationId not in the contract", () => {
+    expect(() =>
+      allocateWithVariableConsideration({
+        baseAmount: 100_000,
+        pos: [po({ id: "po-1", sequenceNo: 1, ssp: 100_000 })],
+        components: [
+          {
+            ...comp("Targets nonexistent", "INCREASE", 5_000),
+            targetObligationId: "po-MISSING",
+          },
+        ],
+      })
+    ).toThrow(/targets obligationId=po-MISSING/);
+  });
+
+  it("rejects when a PO's net allocation would go negative", () => {
+    // PO-1 gets 60% of 100k = 60k contract-wide. Targeted refund of
+    // 65k drives PO-1's net to -5k — unsupported.
+    expect(() =>
+      allocateWithVariableConsideration({
+        baseAmount: 100_000,
+        pos: [
+          po({ id: "po-1", sequenceNo: 1, ssp: 60_000 }),
+          po({ id: "po-2", sequenceNo: 2, ssp: 40_000 }),
+        ],
+        components: [
+          {
+            ...comp("Massive refund", "DECREASE", 65_000),
+            targetObligationId: "po-1",
+          },
+        ],
+      })
+    ).toThrow(/net allocation is negative/);
+  });
+
+  it("ignores RESOLVED/REVERSED components even when they have a target", () => {
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [po({ id: "po-1", sequenceNo: 1, ssp: 100_000 })],
+      components: [
+        {
+          ...comp("Inactive", "INCREASE", 50_000, 50_000, "RESOLVED"),
+          targetObligationId: "po-1",
+        },
+      ],
+    });
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("0.00");
+    expect(r.perObligation[0].allocated.toFixed(2)).toBe("100000.00");
+  });
+
+  it("rejects negative base amount", () => {
+    expect(() =>
+      allocateWithVariableConsideration({
+        baseAmount: -100,
+        pos: [po()],
+        components: [],
+      })
+    ).toThrow(/non-negative/);
+  });
+
+  it("rejects components where constrained > unconstrained", () => {
+    expect(() =>
+      allocateWithVariableConsideration({
+        baseAmount: 100_000,
+        pos: [po()],
+        components: [
+          {
+            ...comp("Bad", "INCREASE", 500, 100),
+            targetObligationId: undefined,
+          },
+        ],
+      })
+    ).toThrow(/constrained 500.*unconstrained 100/);
+  });
+});
+
+describe("allocateWithVariableConsideration — penny-perfect totals", () => {
+  it("preserves the last-residual invariant from the underlying allocator", () => {
+    // 100k contract-wide split 33/33/34. The allocator's residual
+    // lands on the last PO. Per-PO targeted on PO-1 shouldn't disturb
+    // the contract-wide residual.
+    const r = allocateWithVariableConsideration({
+      baseAmount: 100_000,
+      pos: [
+        po({ id: "po-1", sequenceNo: 1, ssp: 33_000 }),
+        po({ id: "po-2", sequenceNo: 2, ssp: 33_000 }),
+        po({ id: "po-3", sequenceNo: 3, ssp: 34_000 }),
+      ],
+      components: [
+        { ...comp("PO-1 bonus", "INCREASE", 100), targetObligationId: "po-1" },
+      ],
+    });
+    // Σ contract-wide allocations exactly = contract-wide price (100k)
+    const cw = r.perObligation.reduce(
+      (acc, p) => acc.plus(p.contractWideAllocated),
+      new Decimal(0)
+    );
+    expect(cw.toFixed(2)).toBe("100000.00");
+    // PO-1 gets the targeted bonus on top
+    expect(r.perObligation[0].targetedAdjustment.toFixed(2)).toBe("100.00");
   });
 });

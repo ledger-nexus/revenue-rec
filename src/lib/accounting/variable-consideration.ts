@@ -73,6 +73,15 @@ export interface VariableConsiderationComponent {
   constrainedAmount: Decimal | string | number;
   /** The unconstrained estimate (>= constrainedAmount). */
   unconstrainedAmount: Decimal | string | number;
+  /**
+   * Per-PO targeting (ASC 606-10-32-39). When null/undefined, the
+   * component contributes to the contract-wide transaction price and
+   * its adjustment distributes across all POs proportionally to SSP
+   * via the standard allocator. When set, the entire adjustment
+   * lands on the targeted PO — used for refund rights and bonuses
+   * tied to a specific deliverable.
+   */
+  targetObligationId?: string | null;
 }
 
 export class VariableConsiderationError extends Error {
@@ -336,6 +345,182 @@ export function computeAdjustedTransactionPrice(input: {
     netVariableAdjustment: round2(netAdjustment),
     adjustedAmount: adjusted,
     components: breakdown,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-PO-aware allocation (ASC 606-10-32-39)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ASC 606-10-32-39 carves out variable consideration that "relates
+// entirely to the entity's efforts to satisfy a performance
+// obligation" — a refund right on Implementation services, a bonus
+// tied to on-time delivery of one PO, a usage-tier discount on the
+// subscription PO only. For those components, the entire adjustment
+// lands on the targeted PO rather than distributing proportionally
+// across all POs by SSP.
+//
+// The math splits into two streams:
+//
+//   Contract-wide adjustment = Σ_ACTIVE (no targetObligationId)
+//     (signed × constrained)
+//
+//   PO i's allocation =
+//     (ssp_i / Σssp) × (base + contract-wide adjustment)
+//     + Σ_targeted_to_po_i (signed × constrained)
+//
+// The contract-wide stream goes through the existing SSP allocator
+// (penny-perfect residual on last PO). The per-PO targeted amounts
+// are added on top without further allocation. Total transaction
+// price = base + Σ all signed adjustments (regardless of target).
+
+import { allocateTransactionPrice } from "./allocator";
+
+export interface PerformanceObligationForAllocation {
+  /** Stable identifier; the targeting match key. */
+  id: string;
+  /** 1-based ordering used by the allocator. */
+  sequenceNo: number;
+  description: string;
+  ssp: Decimal | string | number;
+}
+
+export interface AllocateWithVcInput {
+  baseAmount: Decimal | string | number;
+  pos: PerformanceObligationForAllocation[];
+  components: VariableConsiderationComponent[];
+}
+
+export interface AllocateWithVcResult {
+  /** base + Σ contract-wide (non-targeted) signed adjustments. */
+  contractWidePrice: Decimal;
+  /** base + Σ ALL signed adjustments (contract-wide + per-PO). */
+  totalAdjustedPrice: Decimal;
+  /** Per-PO allocation breakdown. */
+  perObligation: Array<{
+    id: string;
+    sequenceNo: number;
+    description: string;
+    ssp: Decimal;
+    /** Slice of the contract-wide price, proportional to SSP. */
+    contractWideAllocated: Decimal;
+    /** Sum of signed targeted adjustments for this PO (may be 0). */
+    targetedAdjustment: Decimal;
+    /** Final allocation = contractWideAllocated + targetedAdjustment. */
+    allocated: Decimal;
+  }>;
+}
+
+/**
+ * Allocate a contract's transaction price across POs, honoring per-PO
+ * targeted variable consideration per ASC 606-10-32-39.
+ *
+ * Throws VariableConsiderationError if:
+ *   - A targetObligationId references a PO not in the input list
+ *   - Any PO's final allocation would be negative (per-PO refund
+ *     liability — out of scope; matches contract-level negative
+ *     refusal in computeAdjustedTransactionPrice)
+ */
+export function allocateWithVariableConsideration(
+  input: AllocateWithVcInput
+): AllocateWithVcResult {
+  const base = toDecimal(input.baseAmount);
+  if (base.isNegative()) {
+    throw new VariableConsiderationError(
+      `Base transaction price must be non-negative (got ${base.toFixed(2)})`
+    );
+  }
+
+  // Pre-validate every component (constraint sanity). Reuses the
+  // existing function for the contract-wide stream side-effects and
+  // for shared error messages.
+  for (const c of input.components) {
+    const constrained = toDecimal(c.constrainedAmount);
+    const unconstrained = toDecimal(c.unconstrainedAmount);
+    if (constrained.greaterThan(unconstrained)) {
+      throw new VariableConsiderationError(
+        `Component "${c.description}": constrained ${constrained.toFixed(2)} > unconstrained ${unconstrained.toFixed(2)}`
+      );
+    }
+  }
+
+  const posById = new Map(input.pos.map((p) => [p.id, p]));
+
+  // Stream 1: contract-wide adjustment via the existing helper.
+  const contractWideComponents = input.components.filter(
+    (c) => !c.targetObligationId
+  );
+  const contractWideAdjusted = computeAdjustedTransactionPrice({
+    baseAmount: base,
+    components: contractWideComponents,
+  });
+
+  // Stream 2: per-PO targeted adjustments, summed by target.
+  // Validate targets while building the map.
+  const targetedById = new Map<string, Decimal>();
+  for (const c of input.components) {
+    if (!c.targetObligationId) continue;
+    if (c.status !== "ACTIVE") continue;
+    const po = posById.get(c.targetObligationId);
+    if (!po) {
+      throw new VariableConsiderationError(
+        `Component "${c.description}" targets obligationId=${c.targetObligationId}, which is not in the contract`
+      );
+    }
+    const constrained = toDecimal(c.constrainedAmount);
+    const signed =
+      c.direction === "INCREASE" ? constrained : constrained.negated();
+    const current = targetedById.get(po.id) ?? new Decimal(0);
+    targetedById.set(po.id, current.plus(signed));
+  }
+
+  // Allocate the contract-wide portion proportionally to SSP.
+  const allocations = allocateTransactionPrice({
+    totalContractValue: contractWideAdjusted.adjustedAmount,
+    performanceObligations: input.pos.map((p) => ({
+      sequenceNo: p.sequenceNo,
+      description: p.description,
+      ssp: p.ssp,
+    })),
+  });
+  // Map back by sequenceNo to align with input PO order.
+  const allocationsBySeq = new Map(allocations.map((a) => [a.sequenceNo, a]));
+
+  const perObligation = input.pos.map((p) => {
+    const contractWide =
+      allocationsBySeq.get(p.sequenceNo)?.allocatedAmount ?? new Decimal(0);
+    const targetedAdjustment = round2(
+      targetedById.get(p.id) ?? new Decimal(0)
+    );
+    const allocated = round2(contractWide.plus(targetedAdjustment));
+    if (allocated.isNegative()) {
+      throw new VariableConsiderationError(
+        `PO "${p.description}" net allocation is negative: ${contractWide.toFixed(2)} contract-wide + ${targetedAdjustment.toFixed(2)} targeted = ${allocated.toFixed(2)}. Per-PO refund liability — not supported.`
+      );
+    }
+    return {
+      id: p.id,
+      sequenceNo: p.sequenceNo,
+      description: p.description,
+      ssp: toDecimal(p.ssp),
+      contractWideAllocated: round2(contractWide),
+      targetedAdjustment,
+      allocated,
+    };
+  });
+
+  // Total adjusted price = Σ per-PO allocated. By construction this
+  // equals base + Σ all signed adjustments (allocator preserves
+  // contract-wide total; targeted are summed separately).
+  const totalAdjustedPrice = perObligation.reduce(
+    (acc, p) => acc.plus(p.allocated),
+    new Decimal(0)
+  );
+
+  return {
+    contractWidePrice: round2(contractWideAdjusted.adjustedAmount),
+    totalAdjustedPrice: round2(totalAdjustedPrice),
+    perObligation,
   };
 }
 
