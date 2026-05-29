@@ -86,6 +86,19 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
           revenueAccountCode: po.revenueAccountCode,
           deferredAccountCode: po.deferredAccountCode,
         })),
+        // Pass the AI-proposed variable consideration through. The
+        // server reverses any existing ACTIVE VC on the contract,
+        // creates new rows for these, and re-runs the allocator
+        // against the new transaction price. Empty array means "AI
+        // saw no variable consideration" — also a valid signal.
+        variableConsideration: (proposal.variableConsideration ?? []).map((vc) => ({
+          description: vc.description,
+          method: vc.method,
+          direction: vc.direction,
+          unconstrainedAmount: vc.unconstrainedAmount,
+          constrainedAmount: vc.constrainedAmount,
+          constraintRationale: vc.constraintRationale,
+        })),
         totalContractValue: proposal.totalContractValue,
         contractStartDate: proposal.contractStartDate,
         contractEndDate: proposal.contractEndDate,
@@ -177,6 +190,63 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
               ))}
             </tbody>
           </table>
+          {proposal.variableConsideration && proposal.variableConsideration.length > 0 ? (
+            <div className="rounded-md border border-ai/30 bg-violet-50 p-2">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-ink-600">
+                Variable consideration (ASC 606 Step 3) — {proposal.variableConsideration.length}{" "}
+                component{proposal.variableConsideration.length === 1 ? "" : "s"}
+              </div>
+              <table className="w-full text-xs">
+                <thead className="text-ink-500">
+                  <tr>
+                    <th className="px-1 py-1 text-left">Description</th>
+                    <th className="px-1 py-1 text-left">Direction</th>
+                    <th className="px-1 py-1 text-left">Method</th>
+                    <th className="px-1 py-1 text-right">Unconstrained</th>
+                    <th className="px-1 py-1 text-right">Constrained</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {proposal.variableConsideration.map((vc, i) => (
+                    <tr key={i} className="border-t border-ink-100">
+                      <td className="px-1 py-1">{vc.description}</td>
+                      <td className="px-1 py-1">
+                        <Badge tone={vc.direction === "INCREASE" ? "positive" : "warning"}>
+                          {vc.direction === "INCREASE" ? "↑ Increase" : "↓ Decrease"}
+                        </Badge>
+                      </td>
+                      <td className="px-1 py-1 font-mono text-[10px]">
+                        {vc.method === "EXPECTED_VALUE" ? "EXP_VAL" : "MOST_LIKELY"}
+                      </td>
+                      <td className="amount-cell px-1 py-1 text-right">
+                        {vc.unconstrainedAmount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </td>
+                      <td className="amount-cell px-1 py-1 text-right">
+                        {vc.constrainedAmount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <details className="mt-1 text-[11px] text-ink-600">
+                <summary className="cursor-pointer">Constraint rationales</summary>
+                <ul className="mt-1 list-disc pl-5">
+                  {proposal.variableConsideration.map((vc, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{vc.description}:</span>{" "}
+                      {vc.constraintRationale}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </div>
+          ) : null}
           <details className="text-xs text-ink-600">
             <summary className="cursor-pointer">Rationales per PO</summary>
             <ul className="mt-1 list-disc pl-5">
@@ -201,8 +271,11 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
             </Button>
           </div>
           <div className="text-[11px] text-ink-500">
-            Approval wipes the current POs + schedule and regenerates them from the
-            allocator using the SSPs above. Already-posted RecognitionEvents survive.
+            Approval wipes the current POs + schedule and regenerates them from
+            the allocator using the SSPs above. Existing ACTIVE variable
+            consideration is REVERSED (audit history preserved) and the AI's
+            components are created as fresh ACTIVE rows. Already-posted
+            RecognitionEvents survive.
           </div>
         </div>
       ) : null}

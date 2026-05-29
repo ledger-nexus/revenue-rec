@@ -52,7 +52,36 @@ const samplePayload = {
       rationale: "One-time deliverable; distinct from subscription.",
     },
   ],
+  variableConsideration: [],
   notes: "Customer received a $10K discount on implementation.",
+};
+
+// Variant of samplePayload that includes structured variable
+// consideration — used to verify the end-to-end schema round-trips
+// VC components from the model output through to the typed result.
+const samplePayloadWithVC = {
+  ...samplePayload,
+  totalContractValue: 60000,
+  variableConsideration: [
+    {
+      description: "Q4 volume rebate over 5k seats",
+      method: "EXPECTED_VALUE",
+      direction: "DECREASE",
+      unconstrainedAmount: 4000,
+      constrainedAmount: 2500,
+      constraintRationale:
+        "Customer historically hits 60-80% of volume targets. Constrained to the lower bound of the expected range — a higher figure would risk significant reversal if Q4 underperforms.",
+    },
+    {
+      description: "Implementation bonus for on-time go-live",
+      method: "MOST_LIKELY_AMOUNT",
+      direction: "INCREASE",
+      unconstrainedAmount: 5000,
+      constrainedAmount: 0,
+      constraintRationale:
+        "Bonus contingent on a specific milestone; reviewer should add as the project nears completion. Excluded from initial transaction price (constrained = 0) to avoid a reversal.",
+    },
+  ],
 };
 
 function makeMockClient(
@@ -141,6 +170,29 @@ describe("extractContract", () => {
   it("rejects empty contract text", async () => {
     await expect(extractContract("")).rejects.toThrow(/empty/);
     await expect(extractContract("   \n\n  ")).rejects.toThrow(/empty/);
+  });
+
+  it("parses variable consideration components from the model output", async () => {
+    setClientForTesting(makeMockClient(samplePayloadWithVC));
+    const r = await extractContract(sampleContract);
+    expect(r.extracted.variableConsideration).toHaveLength(2);
+    const rebate = r.extracted.variableConsideration[0];
+    expect(rebate.description).toContain("rebate");
+    expect(rebate.method).toBe("EXPECTED_VALUE");
+    expect(rebate.direction).toBe("DECREASE");
+    expect(rebate.unconstrainedAmount).toBe(4000);
+    expect(rebate.constrainedAmount).toBe(2500);
+    expect(rebate.constraintRationale.length).toBeGreaterThan(20);
+    const bonus = r.extracted.variableConsideration[1];
+    expect(bonus.method).toBe("MOST_LIKELY_AMOUNT");
+    expect(bonus.direction).toBe("INCREASE");
+    expect(bonus.constrainedAmount).toBe(0); // fully constrained out
+  });
+
+  it("accepts an empty variableConsideration array (fixed consideration contract)", async () => {
+    setClientForTesting(makeMockClient(samplePayload));
+    const r = await extractContract(sampleContract);
+    expect(r.extracted.variableConsideration).toEqual([]);
   });
 
   it("throws when the model returns no parsed_output", async () => {

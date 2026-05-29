@@ -52,6 +52,24 @@ export interface ApproveInput {
     revenueAccountCode: string;
     deferredAccountCode: string;
   }>;
+  // Variable consideration components the human approved (verbatim
+  // from the AI proposal, or edited). When provided, the existing
+  // ACTIVE variable considerations on the contract are REVERSED first
+  // (preserving their audit history), then these new ones are created
+  // with an initial reassessment baseline.
+  //
+  // Omit entirely to keep existing variable consideration unchanged
+  // (the previously-approved set passes through to the allocator). An
+  // empty array (length 0) means "the AI saw no variable consideration"
+  // — same effect as omitting.
+  variableConsideration?: Array<{
+    description: string;
+    method: "EXPECTED_VALUE" | "MOST_LIKELY_AMOUNT";
+    direction: "INCREASE" | "DECREASE";
+    unconstrainedAmount: number;
+    constrainedAmount: number;
+    constraintRationale: string;
+  }>;
   // Caller may also adjust the contract's total + dates if the AI got
   // them wrong. All optional — falls back to existing contract values.
   totalContractValue?: number;
@@ -64,6 +82,7 @@ export interface ApproveState {
   message: string;
   poCount?: number;
   scheduleRowCount?: number;
+  variableConsiderationCount?: number;
 }
 
 export async function approveExtractionAction(
@@ -112,19 +131,38 @@ export async function approveExtractionAction(
     // Apply variable consideration adjustment to the base contract
     // value BEFORE allocating. The allocator and schedule generator
     // are unchanged — they always work on the adjusted price.
+    //
+    // When the operator includes `input.variableConsideration` (i.e.,
+    // they approved an AI proposal that contained variable
+    // consideration components), the existing ACTIVE rows are
+    // REVERSED (status flip, audit history preserved via the
+    // reassessment table) and the new ones are created with initial
+    // baseline reassessments. The allocator runs against the new set.
+    //
+    // When omitted, the existing VC carries through unchanged — useful
+    // for "re-approve same proposal, just re-allocate" flows.
     const baseTotal = new Decimal(
       input.totalContractValue ?? contract.totalContractValue.toString()
     );
-    const variableComponents: VariableConsiderationComponent[] =
-      contract.variableConsiderations.map((c) => ({
-        id: c.id,
-        description: c.description,
-        method: c.method,
-        direction: c.direction,
-        status: c.status,
-        constrainedAmount: c.currentConstrainedAmount.toString(),
-        unconstrainedAmount: c.currentUnconstrainedAmount.toString(),
-      }));
+    const useIncomingVc = input.variableConsideration !== undefined;
+    const variableComponents: VariableConsiderationComponent[] = useIncomingVc
+      ? input.variableConsideration!.map((c) => ({
+          description: c.description,
+          method: c.method,
+          direction: c.direction,
+          status: "ACTIVE" as const,
+          constrainedAmount: c.constrainedAmount,
+          unconstrainedAmount: c.unconstrainedAmount,
+        }))
+      : contract.variableConsiderations.map((c) => ({
+          id: c.id,
+          description: c.description,
+          method: c.method,
+          direction: c.direction,
+          status: c.status,
+          constrainedAmount: c.currentConstrainedAmount.toString(),
+          unconstrainedAmount: c.currentUnconstrainedAmount.toString(),
+        }));
     const adjusted = computeAdjustedTransactionPrice({
       baseAmount: baseTotal,
       components: variableComponents,
@@ -153,6 +191,7 @@ export async function approveExtractionAction(
     const endDate = endDateInput ? new Date(endDateInput) : null;
 
     let scheduleRowCount = 0;
+    let variableConsiderationCount = 0;
 
     await prisma.$transaction(async (tx) => {
       // Wipe existing POs + cascaded schedule rows. Recognition events
@@ -164,6 +203,58 @@ export async function approveExtractionAction(
       // the schedule cleanup. RecognitionEvent's obligation FK doesn't
       // cascade so events stay attached to the contract.
       await tx.performanceObligation.deleteMany({ where: { contractId: contract.id } });
+
+      // Variable consideration: when the incoming AI proposal contains
+      // a VC array, REVERSE existing ACTIVE rows (non-destructive — the
+      // reassessment table preserves history) and create the new set
+      // with initial reassessment baselines.
+      if (useIncomingVc) {
+        const existingActive = contract.variableConsiderations.filter(
+          (c) => c.status === "ACTIVE"
+        );
+        if (existingActive.length > 0) {
+          await tx.variableConsideration.updateMany({
+            where: { id: { in: existingActive.map((c) => c.id) } },
+            data: { status: "REVERSED" },
+          });
+        }
+        for (const vc of input.variableConsideration!) {
+          const created = await tx.variableConsideration.create({
+            data: {
+              contractId: contract.id,
+              description: vc.description,
+              method: vc.method,
+              direction: vc.direction,
+              status: "ACTIVE",
+              currentUnconstrainedAmount: new Decimal(vc.unconstrainedAmount).toFixed(4),
+              currentConstrainedAmount: new Decimal(vc.constrainedAmount).toFixed(4),
+              constraintRationale: vc.constraintRationale,
+            },
+            select: { id: true },
+          });
+          // Initial baseline reassessment row — the audit anchor for
+          // this component's history. Matches the pattern
+          // addVariableConsiderationAction creates for operator-typed
+          // components.
+          await tx.variableConsiderationReassessment.create({
+            data: {
+              variableConsiderationId: created.id,
+              priorConstrainedAmount: null,
+              priorUnconstrainedAmount: null,
+              newConstrainedAmount: new Decimal(vc.constrainedAmount).toFixed(4),
+              newUnconstrainedAmount: new Decimal(vc.unconstrainedAmount).toFixed(4),
+              // No catch-up on the initial baseline — there's no prior
+              // recognition to true up against. (The catch-up math
+              // applies on subsequent reassessments, run via the
+              // dedicated reassess action.)
+              catchUpAmount: null,
+              rationale: `AI extraction baseline: ${vc.constraintRationale}`,
+              reassessedBy: tenant.id,
+            },
+          });
+          variableConsiderationCount += 1;
+        }
+      }
 
       // Update contract metadata in case dates / total changed.
       await tx.revenueContract.update({
@@ -225,11 +316,16 @@ export async function approveExtractionAction(
 
     revalidatePath(`/contracts/${input.contractId}`);
 
+    const vcLabel =
+      variableConsiderationCount > 0
+        ? `; created ${variableConsiderationCount} variable consideration component(s)`
+        : "";
     return {
       ok: true,
-      message: `Approved ${input.performanceObligations.length} PO(s); generated ${scheduleRowCount} schedule row(s).`,
+      message: `Approved ${input.performanceObligations.length} PO(s); generated ${scheduleRowCount} schedule row(s)${vcLabel}.`,
       poCount: input.performanceObligations.length,
       scheduleRowCount,
+      variableConsiderationCount,
     };
   } catch (e) {
     if (e instanceof NotAuthenticatedError)
