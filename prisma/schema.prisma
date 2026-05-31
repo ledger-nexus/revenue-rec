@@ -167,6 +167,14 @@ model JournalLine {
 
 model RevenueContract {
   id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SOC 2 CC6.1: ledger-core's authoritative RevenueContract column is
+  // NOT NULL on tenantId. Surfacing it on the mirror lets revenue-rec's
+  // queries tenant-scope the contract explicitly. New writes from this
+  // repo (extractContractAction, approveExtractionAction) source the
+  // value from requireCurrentTenant(). Mirrors the recon Party-mirror
+  // fix from commit 9fa3d2d.
+  tenantId           String                @db.Uuid
+  tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   entityId           String                @db.Uuid
   entity             LegalEntity           @relation(fields: [entityId], references: [id])
   code               String
@@ -646,6 +654,7 @@ model Tenant {
   aiExtractionSuggestions AiExtractionSuggestion[]
   rateLimitEvents         RateLimitEvent[]
   aiSpendAlerts           AiSpendAlert[]
+  revenueContracts        RevenueContract[]
 
   @@map("tenant")
 }
