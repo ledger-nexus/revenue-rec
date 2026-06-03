@@ -116,8 +116,31 @@ before marking work done.
 - **Error responses (CC7):** every error sent to a client goes
   through `sanitizeError()`. Raw `err.message + err.stack` MUST NOT
   cross the wire.
+- **Field-level encryption (CC6 — Confidentiality TSC):** confidential
+  columns are AES-256-GCM-encrypted at rest via the Prisma extension
+  in `src/lib/db/encrypted-fields-extension.ts`. Adding a new
+  confidential column = adding it to `ENCRYPTED_COLUMNS` in that file
+  + writing a backfill in `scripts/encrypt-{model}-{field}.ts` +
+  testing the roundtrip in `tests/encrypted-fields-extension.test.ts`.
+  Use `type: "json"` mode for `Json`-typed columns.
+
+  **Currently encrypted in revenue-rec:**
+    - `RevenueContract.description` (free-text contract summary)
+    - `RevenueContract.sourcePayload` (Json mode — frozen ERP payload)
+    - `Party.displayName` (READ side — ledger-core writes; revenue-rec
+      reads via `customer.displayName` on the dashboard, contracts
+      list, contract detail, and AI audit panel)
+    - `AiExtractionSuggestion.obligationsJson` (Json mode)
+    - `AiExtractionSuggestion.allocationJson` (Json mode)
+    - `AiExtractionSuggestion.variableConsiderationJson` (Json mode)
+
+  Reads in tests that touch encrypted columns must go through the
+  extended client (`import { prisma } from "@/lib/db"`). A raw
+  `new PrismaClient()` returns ciphertext.
 
 When you finish a unit of work, run `/soc2-check` on the diff. Commit
 messages on security-relevant changes should cite the Common Criterion
 (e.g., `(CC6 — IDOR defense)`). The full gap analysis lives in
-ledger-core at `docs/SOC2_READINESS.md`.
+ledger-core at `docs/SOC2_READINESS.md`; the production rollout
+procedure for encryption columns lives at
+`ledger-core/docs/runbooks/encryption-rollout.md`.
