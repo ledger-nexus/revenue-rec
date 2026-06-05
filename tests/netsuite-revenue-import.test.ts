@@ -150,6 +150,7 @@ describe("importFromNsRevenue — orchestrator", () => {
     const { prisma, state } = makeMockPrisma();
     const result = await importFromNsRevenue(prisma, {
       export: makeExport(),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -172,6 +173,7 @@ describe("importFromNsRevenue — orchestrator", () => {
     });
     const result = await importFromNsRevenue(prisma, {
       export: makeExport(),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -199,6 +201,7 @@ describe("importFromNsRevenue — orchestrator", () => {
 
     const result = await importFromNsRevenue(prisma, {
       export: makeExport({ arrangements: [goodArrangement, badArrangement] }),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       // Resolver throws for the bad arrangement only.
       resolveCustomerPartyId: async ({ nsCustomerInternalId }) => {
@@ -227,6 +230,7 @@ describe("importFromNsRevenue — orchestrator", () => {
           makeTemplate({ rec_method: "REC_CUSTOM_THING" }),
         ],
       }),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -239,6 +243,7 @@ describe("importFromNsRevenue — orchestrator", () => {
     const { prisma } = makeMockPrisma();
     const result = await importFromNsRevenue(prisma, {
       export: makeExport(),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "", // empty → throw
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -253,6 +258,7 @@ describe("importFromNsRevenue — orchestrator", () => {
     const { prisma } = makeMockPrisma();
     const result = await importFromNsRevenue(prisma, {
       export: makeExport(),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "", // empty → throw
     });
@@ -285,6 +291,7 @@ describe("importFromNsRevenue — orchestrator", () => {
 
     const result = await importFromNsRevenue(prisma, {
       export: makeExport({ arrangements: [arrangement] }),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -312,6 +319,7 @@ describe("importFromNsRevenue — orchestrator", () => {
 
     const result = await importFromNsRevenue(prisma, {
       export: makeExport({ arrangements }),
+      tenantId: "tenant-test-1",
       resolveEntityId: async ({ nsSubsidiaryInternalId }) =>
         nsSubsidiaryInternalId === "missing-sub" ? "" : "entity-1",
       resolveCustomerPartyId: async () => "party-1",
@@ -340,6 +348,7 @@ describe("importFromNsRevenue — orchestrator", () => {
 
     await importFromNsRevenue(prisma, {
       export: makeExport({ arrangements: [arrangement] }),
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });
@@ -361,6 +370,7 @@ describe("importFromNsRevenue — orchestrator", () => {
     const { prisma, state } = makeMockPrisma();
     await importFromNsRevenue(prisma, {
       export: makeExport(), // default: ssp=12000, allocated=12000
+      tenantId: "tenant-test-1",
       resolveEntityId: async () => "entity-1",
       resolveCustomerPartyId: async () => "party-1",
     });

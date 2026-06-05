@@ -44,6 +44,18 @@ export interface ImportFromNsRevenueInput {
   export: NsRevenueArrangementExport;
 
   /**
+   * The tenant the imported contracts + POs belong to. The
+   * orchestrator writes `tenantId = input.tenantId` on every created
+   * RevenueContract row. The caller (typically a Server Action) reads
+   * it from `requireCurrentTenant()` before invoking.
+   *
+   * CC6.1 (multi-tenant isolation): the orchestrator NEVER reads this
+   * from session state — explicit input means cross-tenant misuse
+   * shows up at the call site, not buried inside the orchestrator.
+   */
+  tenantId: string;
+
+  /**
    * Resolve a revenue-rec `LegalEntity` id from the NS subsidiary's
    * internal id. The orchestrator does NOT auto-create LegalEntities —
    * those are bootstrapped via the universal NetSuite mapper in
@@ -244,7 +256,12 @@ async function importOneArrangement(
   // the row a successful previous run created.
   const result = await prisma.$transaction(async (tx) => {
     const contract = await tx.revenueContract.create({
-      data: contractCreateData(mapped.contract, entityId, customerPartyId),
+      data: contractCreateData(
+        mapped.contract,
+        input.tenantId,
+        entityId,
+        customerPartyId
+      ),
       select: { id: true },
     });
     for (const po of mapped.obligations) {
@@ -259,8 +276,8 @@ async function importOneArrangement(
           fairValueMethod: po.fairValueMethod,
           quantity: po.quantity.toFixed(4),
           recognitionPattern: po.recognitionPattern,
-          startDate: po.startDate,
-          endDate: po.endDate,
+          startDate: new Date(po.startDate),
+          endDate: po.endDate ? new Date(po.endDate) : null,
           revenueAccountCode: po.revenueAccountCode,
           deferredAccountCode: po.deferredAccountCode,
         },
@@ -283,18 +300,23 @@ async function importOneArrangement(
  * Translate a `MappedRevenueContract` to the Prisma create-input shape
  * for `RevenueContract`. Kept separate so tests can call it without
  * exercising the full orchestrator.
+ *
+ * `tenantId` is required (CC6.1 — multi-tenant isolation enforced at
+ * the substrate boundary).
  */
 function contractCreateData(
   mapped: MappedRevenueContract,
+  tenantId: string,
   entityId: string,
   customerPartyId: string
 ) {
   return {
+    tenantId,
     entityId,
     code: mapped.code,
     description: mapped.description,
     customerPartyId,
-    contractStartDate: mapped.contractStartDate,
+    contractStartDate: new Date(mapped.contractStartDate),
     totalContractValue: mapped.totalContractValue.toFixed(4),
     currencyId: mapped.currencyId,
     sourceSystem: mapped.sourceSystem,
