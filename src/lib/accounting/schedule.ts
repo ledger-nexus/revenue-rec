@@ -143,8 +143,43 @@ export function generateSchedule(input: ScheduleInput): SchedulePeriod[] {
     return periods;
   }
 
+  if (input.pattern === "OVER_TIME_USAGE") {
+    // USAGE recognition is event-driven, not schedule-driven. We
+    // cannot plan periods up-front because recognition timing depends
+    // on the customer's actual consumption (Plaid-style transaction
+    // ingestion, metering events, etc.).
+    //
+    // Returning an empty schedule (with no thrown error) lets the
+    // mapper produce USAGE-pattern POs without crashing the engine.
+    // The Server Action that posts recognition reads `RecognitionEvent`
+    // rows triggered by inbound usage events; the planned schedule
+    // simply isn't applicable.
+    //
+    // To eagerly populate planned amounts, callers would supply a
+    // usage forecast (out of scope for this function — pattern-
+    // agnostic forecasts belong in a separate forecaster module).
+    return [];
+  }
+
+  if (input.pattern === "OVER_TIME_MILESTONE") {
+    // MILESTONE recognition is driven by named project completion
+    // events (e.g., "design phase 50%", "go-live 100%"). The schedule
+    // requires Milestone[] input — start/end dates alone aren't
+    // sufficient. We accept the pattern at the function boundary so
+    // mappers don't crash, but emit nothing without milestone data.
+    //
+    // A future Server Action will accept Milestone[] and call a
+    // dedicated `generateMilestoneSchedule()` helper. The mapper's
+    // start/end dates are still useful as period bounds; we just
+    // don't emit anything planned without milestone input here.
+    return [];
+  }
+
+  // Compile-time exhaustiveness: if a new pattern is added to the
+  // union, the unhandled case becomes a TypeScript error.
+  const _exhaustive: never = input.pattern;
   throw new ScheduleError(
-    `Pattern ${input.pattern} is not supported in v0.1 (lands in v0.2)`
+    `Pattern ${_exhaustive as string} is not supported`
   );
 }
 
