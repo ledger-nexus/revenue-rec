@@ -38,3 +38,10 @@ export {
   type ImportFromNsRevenueResult,
   type ImportArrangementResult,
 } from "./import";
+
+export {
+  exportToNsRevenue,
+  diffNsRevenueExports,
+  type ExportToNsRevenueInput,
+  type ExportToNsRevenueResult,
+} from "./export";
