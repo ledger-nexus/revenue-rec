@@ -46,7 +46,7 @@
 //     // does not control flow.
 //   }
 
-import { redactPii } from "@/lib/soc2/redact-pii";
+import { redactPii, sanitizeErrorForCapture } from "@/lib/soc2/redact-pii";
 
 /**
  * Context passed alongside an error for triage. NEVER include raw user
@@ -134,21 +134,23 @@ export function captureError(err: unknown, context: ErrorContext = {}): void {
 
   const Sentry = getSentryClient();
   if (Sentry) {
-    Sentry.captureException(err, { extra: safeContext });
+    // 14th-pass H1 fix: sanitize the err so Sentry receives a copy
+    // with .message redacted + .stack preamble stripped.
+    Sentry.captureException(sanitizeErrorForCapture(err), {
+      extra: safeContext,
+    });
     return;
   }
 
-  // Fallback: console.error. The trail is less useful for SOC 2 than
-  // a real monitor (Vercel function logs roll over in ~7 days on the
-  // free tier) but at least the event isn't silent.
-  //
-  // We deliberately do NOT pass `err` directly — Prisma errors echo
-  // column values in `.message` and `console.error` would print them.
-  // Instead extract err.name + err.code and let redactPii handle the
-  // rest.
+  // Fallback: console.error. 14th-pass M1 fix: cap err.code at 16
+  // chars (Neon adapter wrappers embed host:port in .code).
   const summary =
     err instanceof Error
-      ? { errName: err.name, errCode: (err as { code?: string }).code }
+      ? {
+          errName: err.name,
+          errCode: ((err as { code?: unknown }).code as string | undefined)
+            ?.slice(0, 16),
+        }
       : { errPrimitive: String(err) };
   console.error("[monitoring]", { ...safeContext, ...summary });
 }

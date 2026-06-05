@@ -5,7 +5,12 @@
 // load-bearing carve-out per data-classification.md.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { redactPii, PII_FIELDS } from "../src/lib/soc2/redact-pii";
+import {
+  redactPii,
+  PII_FIELDS,
+  stripStackPreamble,
+  sanitizeErrorForCapture,
+} from "../src/lib/soc2/redact-pii";
 import {
   captureError,
   captureMessage,
@@ -83,7 +88,43 @@ describe("redactPii — PII allowlist", () => {
     expect(PII_FIELDS.has("email")).toBe(true);
     expect(PII_FIELDS.has("rawText")).toBe(true); // load-bearing carve-out
     expect(PII_FIELDS.has("counterpartyName")).toBe(true);
+    // 14th-pass M3: gap-filled fields that ASC 606 extraction
+    // paths populate verbatim.
+    expect(PII_FIELDS.has("signatoryEmail")).toBe(true);
+    expect(PII_FIELDS.has("contractNumber")).toBe(true);
+    expect(PII_FIELDS.has("purchaseOrderNumber")).toBe(true);
+    expect(PII_FIELDS.has("invoiceNumber")).toBe(true);
     expect(PII_FIELDS.has("benign")).toBe(false);
+  });
+
+  it("14th-pass H1: strips PII from Error.stack preamble", () => {
+    const err = new Error("Contract failed for Acme Corp + Jane Doe");
+    const out = redactPii(err);
+    expect(out.stack).not.toContain("Acme Corp");
+    expect(out.stack).not.toContain("Jane Doe");
+    expect(out.stack).toContain("    at ");
+    expect(out.stack).toContain("[REDACTED]");
+  });
+
+  it("14th-pass H1: stripStackPreamble handles missing/edge stacks", () => {
+    expect(stripStackPreamble(undefined)).toBe(undefined);
+    expect(stripStackPreamble("custom format")).toBe("custom format");
+  });
+
+  it("14th-pass M3: redacts signatoryEmail (revenue-rec gap-fill)", () => {
+    const obj = {
+      signatoryEmail: "ceo@counterparty.com",
+      contractNumber: "CONTRACT-2026-001",
+      purchaseOrderNumber: "PO-Acme-100",
+      invoiceNumber: "INV-2026-042",
+      benign: "value",
+    };
+    const out = redactPii(obj);
+    expect(out.signatoryEmail).toBe("[REDACTED]");
+    expect(out.contractNumber).toBe("[REDACTED]");
+    expect(out.purchaseOrderNumber).toBe("[REDACTED]");
+    expect(out.invoiceNumber).toBe("[REDACTED]");
+    expect(out.benign).toBe("value");
   });
 });
 
@@ -144,6 +185,37 @@ describe("captureError — Sentry fallback path", () => {
     const serialized = JSON.stringify(args);
     expect(serialized).toContain("errPrimitive");
     expect(serialized).toContain("string-error");
+  });
+
+  it("14th-pass M1: caps err.code at 16 chars", () => {
+    const err = new Error("boom");
+    (err as { code?: string }).code =
+      "ECONNREFUSED: 10.0.1.42:5432 server-side";
+    captureError(err, { context: "test" });
+    const args = consoleErrorSpy.mock.calls[0];
+    const serialized = JSON.stringify(args);
+    expect(serialized).not.toContain("10.0.1.42");
+    expect(serialized).toContain("ECONNREFUSED: 10");
+  });
+});
+
+describe("sanitizeErrorForCapture — Sentry path safety (14th-pass H1)", () => {
+  it("returns non-Errors unchanged", () => {
+    expect(sanitizeErrorForCapture("string-error")).toBe("string-error");
+  });
+
+  it("returns a NEW Error (doesn't mutate the caller's err)", () => {
+    const original = new Error("Failed for Acme Corp");
+    const out = sanitizeErrorForCapture(original);
+    expect(original.message).toBe("Failed for Acme Corp");
+    expect((out as Error).message).toBe("[REDACTED]");
+  });
+
+  it("strips PII from the returned Error's .stack", () => {
+    const original = new Error("Failed for Acme Corp");
+    const out = sanitizeErrorForCapture(original) as Error;
+    expect(out.stack).not.toContain("Acme Corp");
+    expect(out.stack).toContain("[REDACTED]");
   });
 });
 
