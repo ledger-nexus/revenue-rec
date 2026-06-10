@@ -76,6 +76,10 @@ model Book {
 
 model Party {
   id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SECURITY: tenantId added so Server Actions can tenant-scope
+  // party lookups + creates. Column exists in shared DB; this mirror
+  // now surfaces it. Closes part of v2.1 deficiency-log #26.
+  tenantId      String  @db.Uuid
   entityId      String? @db.Uuid
   code          String
   displayName   String
@@ -167,6 +171,14 @@ model JournalLine {
 
 model RevenueContract {
   id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SECURITY: tenantId added so Server Actions can tenant-scope
+  // contract lookups directly + so cross-tenant create attempts can
+  // be caught at the substrate boundary. Column exists in shared DB
+  // (added 2026-05-31 in the multi-tenant rollout); this mirror now
+  // surfaces it so prisma.revenueContract.create + .findFirst can
+  // operate on it from this repo without raw-SQL escape hatches.
+  // Closes part of v2.1 control-deficiency-log entry #26.
+  tenantId           String                @db.Uuid
   entityId           String                @db.Uuid
   entity             LegalEntity           @relation(fields: [entityId], references: [id])
   code               String
@@ -208,7 +220,36 @@ model PerformanceObligation {
   contract           RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
   sequenceNo         Int
   description        String
+  /// Standalone selling price. The "what would we charge for this PO
+  /// on its own" anchor — the input to allocation, NOT necessarily
+  /// the recognized amount.
   ssp                Decimal         @db.Decimal(18, 4)
+  /// Allocated transaction price for this PO. When null, the allocator
+  /// falls back to SSP (proportional allocation default — back-compat
+  /// with pre-2026-06-04 callers). When set, this is the authoritative
+  /// amount the recognition engine schedules. Non-null becomes mandatory
+  /// for NetSuite-imported arrangements where the source carries
+  /// `allocated_amount` explicitly (often divergent from SSP due to
+  /// residual / manual allocation methods).
+  allocatedAmount    Decimal?        @db.Decimal(18, 4)
+  /// How the transaction price got allocated to this PO. ASC 606 ¶78
+  /// permits PROPORTIONAL (relative SSP) as the default; RESIDUAL is
+  /// permitted when SSP for one PO is highly variable / uncertain;
+  /// MANUAL captures auditor-required overrides. Null = unspecified
+  /// (pre-migration data + AI-extracted contracts that didn't surface
+  /// the method).
+  allocationMethod   AllocationMethod?
+  /// Fair-value evidence type (ASC 606 ¶77, formerly ASC 605 VSOE
+  /// hierarchy). ESP = Estimated Selling Price; VSOE = Vendor-Specific
+  /// Objective Evidence; TPE = Third-Party Evidence; RESIDUAL =
+  /// residual approach. Tracked for audit-trail purposes; does not
+  /// affect recognition math. Null = unspecified.
+  fairValueMethod    FairValueMethod?
+  /// Item quantity. Defaults to 1 (the dominant case: SSP carries the
+  /// per-line total, not per-unit). Set explicitly when a NetSuite
+  /// import surfaces a per-unit SSP or when the AI extractor reads
+  /// quantity from contract text.
+  quantity           Decimal         @default(1) @db.Decimal(18, 4)
   recognitionPattern RecognitionPattern
   startDate          DateTime        @db.Date
   endDate            DateTime?       @db.Date
@@ -277,9 +318,25 @@ model AiExtractionSuggestion {
   completionTokens Int?
   latencyMs        Int?
 
+  // Human-decision audit trail (added 2026-06-05 to close v2.1
+  // deficiency #26). When approveExtractionAction succeeds it sets
+  // acceptedBy + acceptedAt. A future rejectExtractionAction would
+  // mirror this with rejectedBy + rejectedAt. Both null on the
+  // initial extraction row (the model output isn't itself a decision).
+  //
+  // DSR attribution (rr-attribution.ts) reads these columns to flip
+  // aiExtractionsAccepted / aiExtractionsRejected from the v2.1
+  // honest-zero state to real counts. Closes deficiency #26 fully.
+  acceptedBy String?   @db.Uuid
+  acceptedAt DateTime?
+  rejectedBy String?   @db.Uuid
+  rejectedAt DateTime?
+
   createdAt DateTime @default(now())
 
   @@index([contractId])
+  @@index([acceptedBy])
+  @@index([rejectedBy])
   @@map("ai_extraction_suggestion")
 }
 
@@ -387,6 +444,26 @@ enum RecognitionPattern {
 enum RecognitionBasis {
   ACCRUAL
   CASH
+}
+
+/// ASC 606 ¶78 allocation methods. PROPORTIONAL is the default
+/// (relative-SSP); RESIDUAL is permitted when SSP for one or more
+/// POs is uncertain; MANUAL captures auditor-required overrides.
+enum AllocationMethod {
+  PROPORTIONAL
+  RESIDUAL
+  MANUAL
+}
+
+/// ASC 606 ¶77 fair-value evidence hierarchy (carried over from
+/// the ASC 605 VSOE/TPE/ESP framework for continuity in audit
+/// trails). RESIDUAL means SSP was determined by the residual
+/// approach (total minus observable SSPs of other POs).
+enum FairValueMethod {
+  ESP
+  VSOE
+  TPE
+  RESIDUAL
 }
 
 // Shared multi-tenancy tables (managed by ledger-core; revenue-rec
