@@ -102,27 +102,50 @@ describe("generateSchedule: OVER_TIME_STRAIGHT", () => {
   });
 });
 
-describe("generateSchedule: unsupported patterns", () => {
-  it("OVER_TIME_USAGE throws — lands in v0.2", () => {
-    expect(() =>
-      generateSchedule({
-        pattern: "OVER_TIME_USAGE",
-        allocatedAmount: 100,
-        startDate: new Date("2026-01-01"),
-        endDate: new Date("2026-12-31"),
-      })
-    ).toThrow(/v0\.2/);
+describe("generateSchedule: event-driven patterns (2026-06-05 update)", () => {
+  // USAGE + MILESTONE patterns are conceptually empty-schedule —
+  // recognition is event-driven (usage telemetry / milestone events),
+  // not forward-plannable from start+end dates alone. We accept these
+  // patterns at the function boundary so the NetSuite mapper doesn't
+  // crash on PO rows of these patterns; the recognition engine reads
+  // RecognitionEvent rows directly for these POs.
+
+  it("OVER_TIME_USAGE returns empty schedule (event-driven recognition)", () => {
+    const result = generateSchedule({
+      pattern: "OVER_TIME_USAGE",
+      allocatedAmount: 100,
+      startDate: new Date("2026-01-01"),
+      endDate: new Date("2026-12-31"),
+    });
+    expect(result).toEqual([]);
   });
 
-  it("OVER_TIME_MILESTONE throws — lands in v0.2", () => {
-    expect(() =>
-      generateSchedule({
-        pattern: "OVER_TIME_MILESTONE",
-        allocatedAmount: 100,
-        startDate: new Date("2026-01-01"),
-        endDate: new Date("2026-12-31"),
-      })
-    ).toThrow(/v0\.2/);
+  it("OVER_TIME_USAGE does NOT require endDate (no schedule generated)", () => {
+    const result = generateSchedule({
+      pattern: "OVER_TIME_USAGE",
+      allocatedAmount: 100,
+      startDate: new Date("2026-01-01"),
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("OVER_TIME_MILESTONE returns empty schedule (event-driven recognition)", () => {
+    const result = generateSchedule({
+      pattern: "OVER_TIME_MILESTONE",
+      allocatedAmount: 100,
+      startDate: new Date("2026-01-01"),
+      endDate: new Date("2026-12-31"),
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("OVER_TIME_MILESTONE does NOT require endDate (no schedule generated)", () => {
+    const result = generateSchedule({
+      pattern: "OVER_TIME_MILESTONE",
+      allocatedAmount: 100,
+      startDate: new Date("2026-01-01"),
+    });
+    expect(result).toEqual([]);
   });
 });
 
