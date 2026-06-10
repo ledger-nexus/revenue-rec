@@ -53,6 +53,12 @@ export interface ApproveInput {
   totalContractValue?: number;
   contractStartDate?: string;
   contractEndDate?: string | null;
+  // Optional: the specific AI extraction suggestion the human is
+  // approving. When set, the action marks that suggestion as accepted
+  // (acceptedBy = currentUser.id + acceptedAt = now) — closing the
+  // human-decision audit trail. Required for DSR attribution to surface
+  // accepted-extraction counts (closes v2.1 deficiency #26).
+  suggestionId?: string;
 }
 
 export interface ApproveState {
@@ -66,7 +72,7 @@ export async function approveExtractionAction(
   input: ApproveInput
 ): Promise<ApproveState> {
   try {
-    await requireCurrentUser();
+    const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
 
     // SECURITY (pen-test pass 4): tenant-scope the contract lookup.
@@ -181,6 +187,27 @@ export async function approveExtractionAction(
           });
           scheduleRowCount += periods.length;
         }
+      }
+
+      // Decision audit trail (2026-06-05 — closes v2.1 deficiency #26).
+      // When the caller passes the suggestionId, mark that specific
+      // AiExtractionSuggestion as accepted. The compound where clause
+      // is tenant-safe: we already verified the contract belongs to
+      // the current tenant, and the suggestion is scoped to that
+      // contract via the FK. updateMany returns count = 0 if the
+      // suggestion id doesn't match this contract; no error thrown,
+      // no other side effects.
+      if (input.suggestionId) {
+        await tx.aiExtractionSuggestion.updateMany({
+          where: {
+            id: input.suggestionId,
+            contractId: contract.id,
+          },
+          data: {
+            acceptedBy: user.id,
+            acceptedAt: new Date(),
+          },
+        });
       }
     });
 
