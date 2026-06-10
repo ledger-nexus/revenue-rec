@@ -197,6 +197,21 @@ export async function approveExtractionAction(
       // contract via the FK. updateMany returns count = 0 if the
       // suggestion id doesn't match this contract; no error thrown,
       // no other side effects.
+      //
+      // 13th-pass H1-rev decision: this write is INSIDE the outer
+      // $transaction intentionally (no try/catch). If it fails the
+      // whole approval rolls back — the PO recreation + schedule
+      // generation are undone too. Rationale: DSR attribution
+      // accuracy is load-bearing for Privacy TSC (CC7.3); a
+      // contract approval whose attribution write silently failed
+      // would diverge the DSR helper from reality forever. Fail-
+      // together is the correct atomic semantics here.
+      //
+      // (Contrast: fa-amort's run-depreciation.ts stamps lastRunBy
+      // OUTSIDE the ledger-core transaction because the JE posting
+      // is the load-bearing side and stamp failure should NOT roll
+      // back posted JEs. Different semantics for different
+      // operations.)
       if (input.suggestionId) {
         await tx.aiExtractionSuggestion.updateMany({
           where: {

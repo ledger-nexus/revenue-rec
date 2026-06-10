@@ -8,7 +8,7 @@
 // Runtime-behavior tests (counts vs. real Postgres) live in
 // `rr-attribution-integration.test.ts`.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   revenueRecAttribution,
   NotImplementedError,
@@ -23,6 +23,59 @@ describe("DSR — revenue-rec attribution contract (Privacy TSC)", () => {
   it("retains the NotImplementedError class export (back-compat)", () => {
     expect(typeof NotImplementedError).toBe("function");
     expect(new NotImplementedError("test").name).toBe("NotImplementedError");
+  });
+
+  it("13th-pass M2-rev: throws when userId is empty string", async () => {
+    const mockPrisma = {
+      contractDocument: { count: vi.fn().mockResolvedValue(0) },
+      recognitionEvent: { count: vi.fn().mockResolvedValue(0) },
+      aiExtractionSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(revenueRecAttribution(mockPrisma, "")).rejects.toThrow(
+      /userId is required/
+    );
+  });
+
+  it("13th-pass M2-rev: throws when userId is null (TS bypass)", async () => {
+    const mockPrisma = {
+      contractDocument: { count: vi.fn().mockResolvedValue(0) },
+      recognitionEvent: { count: vi.fn().mockResolvedValue(0) },
+      aiExtractionSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      revenueRecAttribution(mockPrisma, null as any)
+    ).rejects.toThrow(/userId is required/);
+  });
+
+  it("13th-pass M2-rev: throws when userId is undefined (TS bypass)", async () => {
+    const mockPrisma = {
+      contractDocument: { count: vi.fn().mockResolvedValue(0) },
+      recognitionEvent: { count: vi.fn().mockResolvedValue(0) },
+      aiExtractionSuggestion: { count: vi.fn().mockResolvedValue(0) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      revenueRecAttribution(mockPrisma, undefined as any)
+    ).rejects.toThrow(/userId is required/);
+  });
+
+  it("13th-pass H2-rev: revenueContractsCreated is hardcoded 0 (truthful — no schema, no delegation wired)", async () => {
+    // After the H2-rev correction, revenueContractsCreated MUST be 0
+    // regardless of how many revenue-contracts exist. The interface
+    // promises this until either a createdBy column lands OR an
+    // audit_log delegation is genuinely implemented.
+    const mockPrisma = {
+      contractDocument: { count: vi.fn().mockResolvedValue(99) },
+      recognitionEvent: { count: vi.fn().mockResolvedValue(99) },
+      aiExtractionSuggestion: { count: vi.fn().mockResolvedValue(99) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = await revenueRecAttribution(mockPrisma, "subject-uuid");
+    expect(result.revenueContractsCreated).toBe(0);
   });
 
   it("RevenueRecAttribution interface shape is stable (counts only, no contents)", () => {

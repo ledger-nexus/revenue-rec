@@ -40,13 +40,20 @@
 //     a "re-extract" action would). Helper counts existing values
 //     today, returns 0 until callers populate.
 //
-//   STILL DELEGATED (1 of 5):
+//   HONEST-ZERO (1 of 5) — 13th-pass H2-rev correction:
 //   - `revenueContractsCreated` — `RevenueContract` has no `createdBy`
-//     column. Manual creation isn't wired today; future Server Action
-//     lands the column. AI-extraction-approved contracts surface in
-//     ledger-core's audit_log via the `approveExtractionAction` audit
-//     emission, so the attribution chain is preserved at the portfolio
-//     level. Closes when manual contract creation lands.
+//     column. Manual creation isn't wired; AI-extraction-approved
+//     contracts do not emit a `logAudit` event today (the comment in
+//     `approveExtractionAction` mentions audit but no helper is
+//     called). Earlier prose claimed this was "delegated to ledger-core
+//     audit_log" — that claim was unbacked: ledger-core's
+//     `buildUserDataExport` also has no query for revenue-contract
+//     creation events. The count is **truthfully 0** until either (a)
+//     a `createdBy` column lands here, or (b) `approveExtractionAction`
+//     emits a `revenue_contract.create` audit event AND ledger-core's
+//     export bundle is extended to count it. Until then this field's
+//     zero IS the correct DSR answer for the data we own; what's
+//     missing is the schema column itself, not a delegation.
 
 import type { PrismaClient } from "@prisma/client";
 
@@ -61,10 +68,14 @@ import type { PrismaClient } from "@prisma/client";
  */
 export interface RevenueRecAttribution {
   /**
-   * Revenue contracts the subject created. **Still 0 today** (delegated
-   * to ledger-core's audit_log): `RevenueContract` has no `createdBy`
-   * column. AI-extraction-approved contracts surface in audit_log via
-   * `approveExtractionAction`'s emission. Manual creation isn't wired.
+   * Revenue contracts the subject created. **0 today — schema gap
+   * not yet closed** (13th-pass H2 correction). `RevenueContract` has
+   * no `createdBy` column, and neither `approveExtractionAction` nor
+   * any other code path emits a `revenue_contract.create` audit_log
+   * event. Prior prose claimed an audit_log delegation; the delegation
+   * does not exist on either side of the bundle. Field will surface
+   * real numbers once a `createdBy` column lands here OR an audit_log
+   * event is emitted AND ledger-core's bundle counts it.
    */
   revenueContractsCreated: number;
   /**
@@ -132,6 +143,19 @@ export async function revenueRecAttribution(
   prisma: PrismaClient,
   userId: string
 ): Promise<RevenueRecAttribution> {
+  // 13th-pass M2-rev guard: defense against null/undefined/empty userId
+  // reaching the count queries. Without this, Prisma serializes
+  // `where: { uploadedBy: null }` which matches every NULL-attribution
+  // row (every NetSuite-imported document, every pre-migration row,
+  // and every integration-test seed that left attribution null on
+  // purpose). The DSR export then returns inflated counts that look
+  // like the subject did the work of the entire NetSuite import.
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error(
+      "revenueRecAttribution: userId is required and must be a non-empty string"
+    );
+  }
+
   const [
     contractDocumentsUploaded,
     recognitionSchedulesApproved,
@@ -145,7 +169,10 @@ export async function revenueRecAttribution(
   ]);
 
   return {
-    // Delegated to ledger-core audit_log — see file note.
+    // Truthful 0 until either a createdBy column lands on RevenueContract
+    // OR approveExtractionAction emits a revenue_contract.create audit
+    // event + ledger-core's buildUserDataExport counts it. Neither half
+    // of the delegation exists today (13th-pass H2-rev correction).
     revenueContractsCreated: 0,
     contractDocumentsUploaded,
     recognitionSchedulesApproved,
