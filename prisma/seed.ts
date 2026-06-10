@@ -28,9 +28,11 @@ async function main() {
 
   // 1. Confirm NORTHWIND entity exists (created by ledger-core seed).
   // ledger-core Phase 4b: legalEntity.code unique per [tenantId, code]; findFirst.
+  // Also select tenantId so child rows (Party, RevenueContract) inherit it
+  // for the multi-tenant FK constraint.
   const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
-    select: { id: true },
+    select: { id: true, tenantId: true },
   });
   if (!entity) {
     console.error(
@@ -50,9 +52,12 @@ async function main() {
   }
 
   // 3. Upsert Initech as a customer party. Scoped to NORTHWIND entity.
+  // tenantId mirrors the parent entity's tenant — required by the
+  // multi-tenant column added in the 2026-05-31 hardening sprint.
   const customer = await prisma.party.upsert({
     where: { entityId_code: { entityId: entity.id, code: "INITECH" } },
     create: {
+      tenantId: entity.tenantId,
       entityId: entity.id,
       code: "INITECH",
       displayName: "Initech Industries, Inc.",
@@ -91,6 +96,7 @@ async function main() {
 
   const contract = await prisma.revenueContract.create({
     data: {
+      tenantId: entity.tenantId,
       entityId: entity.id,
       code: "INITECH-2026-01",
       description: "Initech 2026 SaaS subscription + implementation",
