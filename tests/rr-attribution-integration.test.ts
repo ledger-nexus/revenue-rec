@@ -13,6 +13,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 
 // Sentinel UUIDs stable across runs so cleanup works after a crash.
@@ -38,6 +40,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   // Reuse NORTHWIND entity. Don't own the tenant chain.
@@ -111,11 +114,12 @@ async function createContract(args: {
 }
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("revenueRecAttribution — integration vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("revenueRecAttribution — integration vs real Postgres", () => {
   it("returns empty-but-valid shape for a user with no revenue-rec activity", async () => {
     const { revenueRecAttribution } = await import(
       "../src/lib/privacy/rr-attribution"
