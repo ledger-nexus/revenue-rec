@@ -57,15 +57,15 @@ model LegalEntity {
 }
 
 model Book {
-  id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code                String  @unique
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String    @unique
   name                String
   basis               BookBasis
   reportingCurrencyId String
-  isActive            Boolean @default(true)
+  isActive            Boolean   @default(true)
   extensions          Json?
 
-  journalEntries   JournalEntry[]
+  journalEntries    JournalEntry[]
   contractBookAttrs RevenueContractBookAttributes[]
 
   createdAt DateTime @default(now())
@@ -99,23 +99,23 @@ model Party {
 }
 
 model JournalEntry {
-  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
   // No tenantId in this mirror; drop @unique, callers use findFirst.
   entryNumber  String
-  entityId     String      @db.Uuid
-  entity       LegalEntity @relation(fields: [entityId], references: [id])
-  bookId       String      @db.Uuid
-  book         Book        @relation(fields: [bookId], references: [id])
-  periodId     String?     @db.Uuid
-  documentDate DateTime    @db.Date
-  postingDate  DateTime    @db.Date
+  entityId     String        @db.Uuid
+  entity       LegalEntity   @relation(fields: [entityId], references: [id])
+  bookId       String        @db.Uuid
+  book         Book          @relation(fields: [bookId], references: [id])
+  periodId     String?       @db.Uuid
+  documentDate DateTime      @db.Date
+  postingDate  DateTime      @db.Date
   memo         String
   currencyId   String
-  fxRate       Decimal     @default(1) @db.Decimal(20, 10)
+  fxRate       Decimal       @default(1) @db.Decimal(20, 10)
   source       JournalSource @default(MANUAL)
   status       EntryStatus   @default(POSTED)
-  reversalOfId String?     @db.Uuid
+  reversalOfId String?       @db.Uuid
 
   sourceSystem     String?
   sourceRecordType String?
@@ -167,6 +167,14 @@ model JournalLine {
 
 model RevenueContract {
   id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // SOC 2 CC6.1: ledger-core's authoritative RevenueContract column is
+  // NOT NULL on tenantId. Surfacing it on the mirror lets revenue-rec's
+  // queries tenant-scope the contract explicitly. New writes from this
+  // repo (extractContractAction, approveExtractionAction) source the
+  // value from requireCurrentTenant(). Mirrors the recon Party-mirror
+  // fix from commit 9fa3d2d.
+  tenantId           String                @db.Uuid
+  tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   entityId           String                @db.Uuid
   entity             LegalEntity           @relation(fields: [entityId], references: [id])
   code               String
@@ -176,6 +184,19 @@ model RevenueContract {
   contractStartDate  DateTime              @db.Date
   contractEndDate    DateTime?             @db.Date
   totalContractValue Decimal               @db.Decimal(18, 4)
+  // The contract's stated price BEFORE any variable consideration
+  // adjustments. Distinct from totalContractValue, which is the
+  // running adjusted price (= originalBaseAmount + Σ active VC).
+  // Set once at approval time; never updated by reassess/resolve so
+  // the recompute math has a stable anchor.
+  //
+  // Nullable for back-compat with contracts created before this
+  // column existed. The action wrappers fall back to deriving the
+  // base from (totalContractValue − Σ active VC) when null — works
+  // correctly when there's a single VC component or none, but
+  // multi-component contracts get this stamped explicitly to avoid
+  // the approximation noted in audit-pass.
+  originalBaseAmount Decimal?              @db.Decimal(18, 4)
   currencyId         String
   status             RevenueContractStatus @default(ACTIVE)
 
@@ -183,10 +204,11 @@ model RevenueContract {
   bookAttributes         RevenueContractBookAttributes[]
 
   // Backrefs into revenue-rec's owned tables.
-  document            ContractDocument?
-  aiSuggestions       AiExtractionSuggestion[]
-  recognitionSchedules RecognitionSchedule[]
-  recognitionEvents    RecognitionEvent[]
+  document               ContractDocument?
+  aiSuggestions          AiExtractionSuggestion[]
+  recognitionSchedules   RecognitionSchedule[]
+  recognitionEvents      RecognitionEvent[]
+  variableConsiderations VariableConsideration[]
 
   sourceSystem     String?
   sourceRecordType String?
@@ -203,22 +225,36 @@ model RevenueContract {
 }
 
 model PerformanceObligation {
-  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId         String          @db.Uuid
-  contract           RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId         String             @db.Uuid
+  contract           RevenueContract    @relation(fields: [contractId], references: [id], onDelete: Cascade)
   sequenceNo         Int
   description        String
-  ssp                Decimal         @db.Decimal(18, 4)
+  ssp                Decimal            @db.Decimal(18, 4)
   recognitionPattern RecognitionPattern
-  startDate          DateTime        @db.Date
-  endDate            DateTime?       @db.Date
-  recognizedToDate   Decimal         @default(0) @db.Decimal(18, 4)
+  startDate          DateTime           @db.Date
+  endDate            DateTime?          @db.Date
+  recognizedToDate   Decimal            @default(0) @db.Decimal(18, 4)
+
+  // Usage-based recognition (OVER_TIME_USAGE pattern). Required when
+  // recognitionPattern = OVER_TIME_USAGE; null for every other pattern.
+  // pricePerUnit is the contractual unit price (e.g. $0.001 per API
+  // call); unitName labels what's being consumed (free-form — "API
+  // call", "GB-month", "active user").
+  //
+  // The schedule generator emits NO planned periods for OVER_TIME_USAGE.
+  // RecognitionSchedule rows are created on-the-fly when usage is
+  // reported via recordUsageAction. Each row's plannedAmount is the
+  // recorded usageQuantity × pricePerUnit at the time of reporting.
+  pricePerUnit Decimal? @db.Decimal(18, 6)
+  unitName     String?
 
   revenueAccountCode  String
   deferredAccountCode String
 
-  scheduleEntries RecognitionSchedule[]
-  events          RecognitionEvent[]
+  scheduleEntries        RecognitionSchedule[]
+  events                 RecognitionEvent[]
+  variableConsiderations VariableConsideration[]
 
   @@unique([contractId, sequenceNo])
   @@map("performance_obligation")
@@ -231,7 +267,7 @@ model RevenueContractBookAttributes {
   book       Book            @relation(fields: [bookId], references: [id])
 
   recognitionBasis     RecognitionBasis @default(ACCRUAL)
-  cumulativeRecognized Decimal @default(0) @db.Decimal(18, 4)
+  cumulativeRecognized Decimal          @default(0) @db.Decimal(18, 4)
 
   @@id([contractId, bookId])
   @@map("revenue_contract_book_attributes")
@@ -245,15 +281,15 @@ model RevenueContractBookAttributes {
 // reads from here. We keep the verbatim source so a human can always
 // audit "what did the AI see vs. what did we structure."
 model ContractDocument {
-  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId    String          @unique @db.Uuid
-  contract      RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId String          @unique @db.Uuid
+  contract   RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
-  filename      String?
-  rawText       String
-  format        String          @default("TEXT")  // TEXT | PDF (v0.2)
-  uploadedAt    DateTime        @default(now())
-  uploadedBy    String?
+  filename   String?
+  rawText    String
+  format     String   @default("TEXT") // TEXT | PDF (v0.2)
+  uploadedAt DateTime @default(now())
+  uploadedBy String?
 
   @@map("contract_document")
 }
@@ -261,25 +297,48 @@ model ContractDocument {
 // Every AI extraction run is logged here, even if the human rejects it.
 // Mirrors recon's AiSuggestion table — same audit principle.
 model AiExtractionSuggestion {
-  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId      String          @db.Uuid
-  contract        RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId String          @db.Uuid
+  contract   RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  // SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  // row so the audit page can filter without joining through
+  // contract.entity. Nullable to keep db push non-destructive; backfill
+  // via prisma/backfill-ai-extraction-suggestion-tenant.sql. New rows
+  // always get tenantId from extractContractAction's requireCurrentTenant().
+  tenantId String? @db.Uuid
+  tenant   Tenant? @relation(fields: [tenantId], references: [id])
 
   // The model's structured extraction: array of {description, ssp,
   // recognitionPattern, startDate, endDate, rationale}.
-  obligationsJson Json
+  obligationsJson           Json
   // The model's allocation suggestion, if it ran (optional in v0.2).
-  allocationJson  Json?
+  allocationJson            Json?
+  // Variable consideration components proposed by the AI extractor
+  // (v0.3). Array of {description, method, direction, unconstrained,
+  // constrained, rationale, outcomes?}. Null on old rows; populated
+  // on new ones — surfaces in the AI audit panel + the contract
+  // detail proposal preview.
+  variableConsiderationJson Json?
 
-  modelName        String
-  promptHash       String?
-  promptTokens     Int?
-  completionTokens Int?
-  latencyMs        Int?
+  modelName           String
+  promptHash          String?
+  promptTokens        Int?
+  completionTokens    Int?
+  // Prompt-cache telemetry (Anthropic SDK exposes these on the usage
+  // response). cacheReadTokens > 0 means the system prompt was
+  // served from cache; cacheCreationTokens > 0 means the prefix was
+  // written this call. The audit panel computes cache-hit rate from
+  // these. Nullable for back-compat with rows written before the
+  // columns existed.
+  cacheReadTokens     Int?
+  cacheCreationTokens Int?
+  latencyMs           Int?
 
   createdAt DateTime @default(now())
 
   @@index([contractId])
+  @@index([tenantId, createdAt])
   @@map("ai_extraction_suggestion")
 }
 
@@ -292,20 +351,25 @@ model AiExtractionSuggestion {
 // happens. It's also the audit trail of "what we planned vs. what we
 // actually did."
 model RecognitionSchedule {
-  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId        String                @db.Uuid
-  contract          RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  obligationId      String                @db.Uuid
-  obligation        PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
-  bookCode          String
+  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId   String                @db.Uuid
+  contract     RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId String                @db.Uuid
+  obligation   PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode     String
 
-  periodStart       DateTime              @db.Date
-  periodEnd         DateTime              @db.Date
-  plannedAmount     Decimal               @db.Decimal(18, 4)
-  status            String                @default("PLANNED")  // PLANNED | POSTED | SKIPPED
+  periodStart   DateTime @db.Date
+  periodEnd     DateTime @db.Date
+  plannedAmount Decimal  @db.Decimal(18, 4)
+  status        String   @default("PLANNED") // PLANNED | POSTED | SKIPPED
+
+  // OVER_TIME_USAGE bookkeeping. Null for non-usage patterns; set to the
+  // reported consumption when this row was created via recordUsageAction.
+  // plannedAmount = usageQuantity × PO.pricePerUnit (rounded to 2dp).
+  usageQuantity Decimal? @db.Decimal(18, 4)
 
   // Backref: which RecognitionEvent posted this schedule entry (null if PLANNED).
-  postedByEventId   String?               @db.Uuid
+  postedByEventId String? @db.Uuid
 
   createdAt DateTime @default(now())
 
@@ -319,27 +383,169 @@ model RecognitionSchedule {
 // the schema but the posting logic ships in v0.2 alongside the bridge
 // integration.
 model RecognitionEvent {
-  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId      String                @db.Uuid
-  contract        RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  obligationId    String                @db.Uuid
-  obligation      PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
-  bookCode        String
+  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId   String                @db.Uuid
+  contract     RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId String                @db.Uuid
+  obligation   PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode     String
 
-  periodStart     DateTime              @db.Date
-  periodEnd       DateTime              @db.Date
-  amount          Decimal               @db.Decimal(18, 4)
+  periodStart DateTime @db.Date
+  periodEnd   DateTime @db.Date
+  amount      Decimal  @db.Decimal(18, 4)
 
   // The JE that ledger-core posted, returned by the HTTP bridge.
-  postedEntryId   String                @db.Uuid
-  postedEntry     JournalEntry          @relation(fields: [postedEntryId], references: [id])
-  entryNumber     String
+  postedEntryId String       @db.Uuid
+  postedEntry   JournalEntry @relation(fields: [postedEntryId], references: [id])
+  entryNumber   String
 
-  postedAt        DateTime              @default(now())
-  postedBy        String?
+  postedAt DateTime @default(now())
+  postedBy String?
 
   @@index([contractId, bookCode, periodStart])
   @@map("recognition_event")
+}
+
+// ASC 606 Step 3 — variable consideration. Each row represents one
+// estimable component of a contract's variable consideration: a
+// volume rebate, a performance bonus, a refund right, a usage-tier
+// discount, etc.
+//
+// The model captures both the math (unconstrained vs constrained
+// amounts) and the auditor-facing reasoning (which estimation method,
+// why we constrained where we did). Reassessment over the life of
+// the contract is supported by versioning: every estimate change is
+// preserved as a VariableConsiderationReassessment row, never a
+// destructive update.
+//
+// Workflow:
+//   1. Operator (or AI extractor in v0.4) creates a VariableConsideration
+//      row with the initial unconstrained + constrained estimate. The
+//      contract's effective transaction price is recomputed and the
+//      allocator re-runs.
+//   2. At each period close, operator can reassess: a new
+//      VariableConsiderationReassessment row is created, the parent
+//      row's currentUnconstrainedAmount / currentConstrainedAmount
+//      are updated, and a cumulative catch-up is computed (delta
+//      vs the prior estimate × already-recognized progress per PO).
+//      The catch-up posts as a JE via the ledger-core bridge.
+//   3. When the variable amount finally resolves to an actual
+//      (year-end true-up, bonus paid out), the row is RESOLVED with
+//      the final amount captured as resolvedAmount and a final
+//      catch-up reassessment.
+//
+// Scope: contract-level for v0.3. Per-PO targeting (ASC 606-10-32-39
+// — variable consideration that relates entirely to a specific PO)
+// is supported via obligationId, but the catch-up math always
+// distributes proportionally by SSP at the contract level.
+model VariableConsideration {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId   String                 @db.Uuid
+  contract     RevenueContract        @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  /// Optional: variable consideration tied to ONE specific PO. Null
+  /// means the component affects the whole contract (proportional
+  /// allocation by SSP). Per ASC 606-10-32-39 this is rare but valid.
+  obligationId String?                @db.Uuid
+  obligation   PerformanceObligation? @relation(fields: [obligationId], references: [id], onDelete: SetNull)
+
+  description String // "Q4 volume rebate", "On-time delivery bonus"
+  method      VariableConsiderationMethod
+  /// INCREASE = bonus / overage (adds to transaction price)
+  /// DECREASE = refund right / rebate (reduces transaction price)
+  direction   VariableConsiderationDirection
+  status      VariableConsiderationStatus    @default(ACTIVE)
+
+  /// Best-estimate variable amount before applying the ASC 606-10-32-11
+  /// constraint. Computed from outcomes when method=EXPECTED_VALUE,
+  /// or set directly when method=MOST_LIKELY_AMOUNT.
+  currentUnconstrainedAmount Decimal @db.Decimal(18, 4)
+  /// The amount actually included in the transaction price after
+  /// applying the constraint. Must be <= unconstrained.
+  currentConstrainedAmount   Decimal @db.Decimal(18, 4)
+  /// Free-text rationale for the constraint (what would cause a
+  /// significant reversal, why we capped at this level). Auditor-facing.
+  constraintRationale        String
+
+  /// Set when status=RESOLVED. The final actual amount that materialized.
+  resolvedAmount Decimal?  @db.Decimal(18, 4)
+  resolvedAt     DateTime?
+  resolvedBy     String?
+
+  /// Outcomes feed the EXPECTED_VALUE method. For MOST_LIKELY_AMOUNT
+  /// they're optional informational rows.
+  outcomes      VariableConsiderationOutcome[]
+  reassessments VariableConsiderationReassessment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([contractId, status])
+  @@map("variable_consideration")
+}
+
+/// One probabilistic outcome feeding the EXPECTED_VALUE estimation
+/// method. probabilityPercent values across a single
+/// VariableConsideration should sum to 100; the computeExpectedValue
+/// helper validates this.
+model VariableConsiderationOutcome {
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  variableConsiderationId String                @db.Uuid
+  variableConsideration   VariableConsideration @relation(fields: [variableConsiderationId], references: [id], onDelete: Cascade)
+
+  scenario           String // "Customer hits 80% of volume target", "Bonus paid in full"
+  amount             Decimal @db.Decimal(18, 4)
+  probabilityPercent Decimal @db.Decimal(7, 4) // 0..100, four decimals for precision
+
+  @@index([variableConsiderationId])
+  @@map("variable_consideration_outcome")
+}
+
+/// Audit log of every reassessment. Created on the initial estimate
+/// (priorAmount=null) and on every subsequent update. The catch-up
+/// amount is recorded here so the operator can later confirm a
+/// posted JE traces back to this assessment event.
+model VariableConsiderationReassessment {
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  variableConsiderationId String                @db.Uuid
+  variableConsideration   VariableConsideration @relation(fields: [variableConsiderationId], references: [id], onDelete: Cascade)
+
+  /// Constrained amount before this reassessment. Null on the
+  /// initial estimate (no prior value).
+  priorConstrainedAmount   Decimal? @db.Decimal(18, 4)
+  newConstrainedAmount     Decimal  @db.Decimal(18, 4)
+  /// Same for unconstrained — captured for the auditor.
+  priorUnconstrainedAmount Decimal? @db.Decimal(18, 4)
+  newUnconstrainedAmount   Decimal  @db.Decimal(18, 4)
+
+  /// Cumulative catch-up posted to the income statement on this
+  /// reassessment. Positive = additional revenue recognized this
+  /// period; negative = reversal. Null if reassessment was recorded
+  /// but no JE was posted (e.g., contract not yet active).
+  catchUpAmount Decimal?  @db.Decimal(18, 4)
+  /// FK to the catch-up JE (via RecognitionEvent) if one was posted.
+  postedEventId String?   @db.Uuid
+  /// When the catch-up JE was posted. Set alongside postedEventId.
+  postedAt      DateTime?
+
+  /// Per-PO catch-up breakdown frozen at reassessment time. JSON of
+  /// `Array<{ obligationId: string, amount: string }>` — amounts are
+  /// decimal-strings to preserve precision. Required by the
+  /// postVariableCatchUpAction because by the time the operator
+  /// clicks Post, each PO.ssp has already been updated to the NEW
+  /// allocation — we can no longer derive the per-PO delta from
+  /// current state.
+  ///
+  /// Null on initial reassessment baselines (no catch-up to post)
+  /// and on reassessments recorded without an allocator state
+  /// (contract not yet active, no POs).
+  perObligationCatchUpJson Json?
+
+  rationale    String // Why the estimate changed
+  reassessedAt DateTime @default(now())
+  reassessedBy String?
+
+  @@index([variableConsiderationId, reassessedAt])
+  @@map("variable_consideration_reassessment")
 }
 
 // =========================================================================
@@ -389,35 +595,125 @@ enum RecognitionBasis {
   CASH
 }
 
+// ASC 606-10-32-8: two methods for estimating variable consideration.
+// EXPECTED_VALUE is the probability-weighted average of all possible
+// outcomes — best when the contract has many discrete outcomes or
+// the entity has many similar contracts.
+// MOST_LIKELY_AMOUNT is the single most likely outcome — best when
+// outcomes are binary (e.g., bonus paid or not).
+enum VariableConsiderationMethod {
+  EXPECTED_VALUE
+  MOST_LIKELY_AMOUNT
+}
+
+// Whether the variable component adds to or subtracts from the
+// base transaction price. Refund rights and rebates are DECREASE;
+// bonuses, overages, and incentive payments are INCREASE.
+enum VariableConsiderationDirection {
+  INCREASE
+  DECREASE
+}
+
+// ACTIVE = estimate is being included in the transaction price and
+//          will be reassessed each period.
+// RESOLVED = the variable amount has materialized to an actual; no
+//            further reassessments expected.
+// REVERSED = the variable component was reversed (e.g., contract
+//            amended, no longer in play). Excluded from transaction
+//            price math going forward.
+enum VariableConsiderationStatus {
+  ACTIVE
+  RESOLVED
+  REVERSED
+}
+
 // Shared multi-tenancy tables (managed by ledger-core; revenue-rec
 // reads them for tenant resolution). Pen-test pass 4.
 model User {
-  id          String  @id @db.Uuid
-  email       String  @unique
+  id          String             @id @db.Uuid
+  email       String             @unique
   displayName String
-  isActive    Boolean @default(true)
+  isActive    Boolean            @default(true)
   memberships TenantMembership[]
 
   @@map("app_user")
 }
 
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id                      String                   @id @db.Uuid
+  slug                    String                   @unique
+  name                    String
+  /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
+  /// revenue-rec never writes this column.
+  monthlyAiSpendCapUsd    Decimal?                 @db.Decimal(10, 2)
+  /// Mirror of ledger-core's Tenant.billingPlan + subscriptionStatus.
+  /// session.requireRepoAccess() reads these to gate by plan.
+  billingPlan             String?
+  subscriptionStatus      String?
+  memberships             TenantMembership[]
+  aiExtractionSuggestions AiExtractionSuggestion[]
+  rateLimitEvents         RateLimitEvent[]
+  aiSpendAlerts           AiSpendAlert[]
+  revenueContracts        RevenueContract[]
 
   @@map("tenant")
 }
 
+/// Spend-threshold alerts. See src/lib/auth/ai-budget.ts. Mirror of
+/// fa-amort's table; revenue-rec tracks its own Opus extraction spend
+/// independently.
+model AiSpendAlert {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Source repo — part of the unique constraint so each repo dedupes
+  /// its own crossings independently. See fa-amort's schema for the
+  /// full rationale.
+  source    String
+  monthKey  String
+  threshold Int
+  capUsd    Decimal  @db.Decimal(10, 2)
+  spentUsd  Decimal  @db.Decimal(10, 2)
+  sentAt    DateTime @default(now())
+
+  @@unique([tenantId, source, monthKey, threshold])
+  @@index([tenantId, sentAt])
+  @@map("ai_spend_alert")
+}
+
+/// Per-action rate-limit ledger. See src/lib/auth/ai-budget.ts.
+/// Mirrors fa-amort's RateLimitEvent; shared concept, per-repo table.
+model RateLimitEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  userId    String?  @db.Uuid
+  action    String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("rate_limit_event")
+}
+
 model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  /// Mirror of ledger-core's TenantRole enum. See src/lib/auth/policy.ts.
+  role     TenantRole @default(MEMBER)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   user   User   @relation(fields: [userId], references: [id])
 
   @@unique([tenantId, userId])
   @@map("tenant_membership")
+}
+
+/// Mirror of ledger-core's TenantRole enum. Must stay in sync —
+/// ledger-core's schema is canonical.
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
 }

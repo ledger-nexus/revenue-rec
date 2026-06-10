@@ -11,10 +11,28 @@ import { prisma } from "@/lib/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
+import { getRepoAccess } from "@/lib/auth/repo-access";
 
 export default async function DashboardPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the dashboard
+  // aggregates. Without these filters, the dashboard would tally Σ
+  // contract value + recognized revenue across every tenant.
+  const tenant = await getCurrentTenant();
+  // Plan gate: revenue-rec is Growth+. When the tenant's plan doesn't
+  // include this repo, render a sticky upgrade banner above the
+  // dashboard. The reads below still happen so existing data stays
+  // visible — the user can see what they're missing.
+  const access = tenant ? getRepoAccess(tenant) : null;
+  const contractWhere = tenant
+    ? { entity: { tenantId: tenant.id } }
+    : { id: "__none__" };
+  const scheduleWhere = tenant
+    ? { contract: { entity: { tenantId: tenant.id } } }
+    : { id: "__none__" };
   const [contracts, schedules] = await Promise.all([
     prisma.revenueContract.findMany({
+      where: contractWhere,
       select: {
         id: true,
         code: true,
@@ -27,6 +45,7 @@ export default async function DashboardPage() {
       orderBy: { contractStartDate: "desc" },
     }),
     prisma.recognitionSchedule.findMany({
+      where: scheduleWhere,
       select: { plannedAmount: true, status: true },
     }),
   ]);
@@ -45,6 +64,19 @@ export default async function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      {access && !access.included && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="text-sm font-medium text-amber-900">
+            revenue-rec is not included in your &quot;{access.currentPlan}&quot; plan
+          </div>
+          <p className="mt-1 text-xs text-amber-700">
+            ASC 606 contract extraction + recognition posting is part of
+            the Growth and Scale tiers. Existing data stays visible, but
+            new AI extractions are refused (or warned in dev). Upgrade at{" "}
+            <code className="font-mono">/admin/billing</code> in ledger-core.
+          </p>
+        </div>
+      )}
       <header>
         <h1 className="text-xl font-semibold text-ink-900">Dashboard</h1>
         <p className="text-sm text-ink-500">

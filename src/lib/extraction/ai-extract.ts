@@ -93,6 +93,76 @@ const ExtractedPoSchema = z.object({
     ),
 });
 
+// ASC 606 Step 3 variable consideration component proposed by the
+// extractor. The reviewer can edit/reject before approval; on approve
+// the deterministic engine creates a corresponding VariableConsideration
+// row + initial reassessment baseline.
+// One probability-weighted scenario for the EXPECTED_VALUE method.
+// The AI surfaces these so the operator + auditor can see the math
+// behind the unconstrained estimate rather than a single opaque number.
+const ExtractedOutcomeSchema = z.object({
+  scenario: z
+    .string()
+    .max(200)
+    .describe(
+      "Short label for this outcome. E.g. 'Customer hits 80% of volume target', 'Q4 milestone delivered on time'."
+    ),
+  amount: z
+    .number()
+    .describe(
+      "Dollar amount the variable consideration would land at under this scenario. Signed per the parent component's direction (the math layer applies the sign)."
+    ),
+  probabilityPercent: z
+    .number()
+    .min(0)
+    .max(100)
+    .describe(
+      "Probability of this scenario, 0..100. Across all outcomes for one component the values MUST sum to 100 (we allow 99.5–100.5 to absorb rounding)."
+    ),
+});
+
+const ExtractedVariableConsiderationSchema = z.object({
+  description: z
+    .string()
+    .describe(
+      "Short label for this component, suitable as the VariableConsideration row label. E.g. 'Q4 volume rebate', 'On-time delivery bonus', '30-day refund right'."
+    ),
+  method: z
+    .enum(["EXPECTED_VALUE", "MOST_LIKELY_AMOUNT"])
+    .describe(
+      "EXPECTED_VALUE for many-outcome scenarios (probability-weighted); MOST_LIKELY_AMOUNT for binary outcomes."
+    ),
+  direction: z
+    .enum(["INCREASE", "DECREASE"])
+    .describe(
+      "INCREASE adds to transaction price (bonus, overage). DECREASE reduces it (refund right, rebate)."
+    ),
+  unconstrainedAmount: z
+    .number()
+    .min(0)
+    .describe(
+      "Best-estimate variable amount before applying the ASC 606-10-32-11 constraint. Always >= 0. For EXPECTED_VALUE method this should equal the probability-weighted sum of `outcomes`."
+    ),
+  constrainedAmount: z
+    .number()
+    .min(0)
+    .describe(
+      "The amount included in transaction price after the constraint. Must be <= unconstrainedAmount. Operator can revise."
+    ),
+  constraintRationale: z
+    .string()
+    .max(400)
+    .describe(
+      "Auditor-facing reasoning: what would cause a significant reversal, why constrained at this level. One to three sentences, concrete."
+    ),
+  outcomes: z
+    .array(ExtractedOutcomeSchema)
+    .default([])
+    .describe(
+      "Probability-weighted scenarios — REQUIRED when method=EXPECTED_VALUE so the auditor sees the math behind unconstrainedAmount. Omit (empty array) for MOST_LIKELY_AMOUNT. Probabilities across outcomes must sum to ~100% (we accept 99.5–100.5)."
+    ),
+});
+
 const ExtractionResponseSchema = z.object({
   contractCode: z
     .string()
@@ -113,7 +183,7 @@ const ExtractionResponseSchema = z.object({
   totalContractValue: z
     .number()
     .describe(
-      "The total dollar amount the customer will pay, as stated in the contract. NOT the sum of SSPs — those may differ when there's a discount or premium."
+      "The total dollar amount the customer will pay, as stated in the contract — BEFORE applying variable consideration. The deterministic allocator runs on baseline + Σ(variable consideration), not this number alone."
     ),
   currencyCode: z.string().describe("ISO 4217, usually 'USD'."),
   performanceObligations: z
@@ -122,15 +192,25 @@ const ExtractionResponseSchema = z.object({
     .describe(
       "All distinct POs identified in the contract, in order of appearance."
     ),
+  variableConsideration: z
+    .array(ExtractedVariableConsiderationSchema)
+    .default([])
+    .describe(
+      "Every detected ASC 606 Step 3 variable consideration component. Empty array if the contract is fully fixed consideration. Default [] for backward-compat with AiExtractionSuggestion rows persisted before this field was added."
+    ),
   notes: z
     .string()
     .max(500)
     .describe(
-      "Anything the human reviewer should know: contract modifications, variable consideration concerns, ambiguity in the source, deviations from common patterns."
+      "Anything the human reviewer should know: contract modifications, ambiguity in the source, deviations from common patterns. Variable consideration goes in its own field, not here."
     ),
 });
 
 export type ExtractedPo = z.infer<typeof ExtractedPoSchema>;
+export type ExtractedOutcome = z.infer<typeof ExtractedOutcomeSchema>;
+export type ExtractedVariableConsideration = z.infer<
+  typeof ExtractedVariableConsiderationSchema
+>;
 export type ExtractionResponse = z.infer<typeof ExtractionResponseSchema>;
 
 export interface ExtractionResult {
@@ -163,7 +243,25 @@ Step 2 — Identify performance obligations. A PO is "distinct" if it is:
   (b) separately identifiable from other promises in the contract.
 A SaaS subscription bundled with implementation services usually has TWO POs (the customer could buy implementation separately; the subscription delivers value on its own). A perpetual software license bundled with installation often has ONE PO (installation is integral). When in doubt, lean toward more POs and explain your reasoning — separation is the harder call to undo.
 
-Step 3 — Determine transaction price. This is what the customer agreed to pay, less variable consideration constraints. For v0.1/v0.2 we assume fixed consideration unless the contract is obviously usage-based.
+Step 3 — Determine transaction price. The contract's stated totalContractValue is the BASELINE — what the customer will pay if every variable outcome lands at the midpoint. The engine adds/subtracts variable consideration on top.
+
+If the contract carries variable consideration — volume rebates, performance bonuses, refund rights, tiered discounts, milestone bonuses, royalties — fill the variableConsideration array. ONE entry per distinguishable component. For each:
+
+- **description**: short label ("Q4 volume rebate", "On-time delivery bonus", "30-day refund right"). This shows up on the contract's VariableConsideration table.
+- **direction**: INCREASE if it adds to transaction price (bonus, overage payment, incentive). DECREASE if it reduces it (refund right, rebate, allowance for returns).
+- **method**: MOST_LIKELY_AMOUNT for binary outcomes ("bonus paid or not"). EXPECTED_VALUE for many-outcome scenarios ("volume tier hit somewhere on the curve"). Pick the one that better fits the contract's structure — ASC 606-10-32-8 leaves this to judgment.
+- **unconstrainedAmount**: your best estimate of what this component is worth, IGNORING the constraint. For most-likely: the single most likely outcome. For expected value: the probability-weighted mean.
+- **constrainedAmount**: what the engine should include in the transaction price after applying ASC 606-10-32-11. The constraint says "include the amount only to the extent it's PROBABLE a significant reversal won't occur." Translate that to a number: typically a fraction of the unconstrained estimate. If you're highly confident the unconstrained will materialize, constrained = unconstrained. If you're meaningfully uncertain, constrained < unconstrained. The reviewer often adjusts this.
+- **constraintRationale**: explain in 1-3 sentences WHY constrained < unconstrained (what could cause a reversal) or why they're equal (why a reversal is improbable). The auditor reads this verbatim.
+- **outcomes**: REQUIRED when method=EXPECTED_VALUE — emit 2-5 distinct probability-weighted scenarios that show your math. Each outcome: short scenario label, dollar amount under that scenario, probability percent. Probabilities MUST sum to 100. The unconstrainedAmount you give above should equal the probability-weighted sum (Σ amount × probability/100). For MOST_LIKELY_AMOUNT method, leave outcomes empty — the single most-likely outcome is captured by unconstrainedAmount alone.
+
+  Example outcomes for a "Q4 volume rebate" with EXPECTED_VALUE method:
+    {scenario: "Customer misses target (no rebate)", amount: 0, probabilityPercent: 25}
+    {scenario: "Customer hits 80% of target (partial rebate)", amount: 3000, probabilityPercent: 50}
+    {scenario: "Customer exceeds target (full rebate)", amount: 6000, probabilityPercent: 25}
+  → unconstrainedAmount = 0×0.25 + 3000×0.50 + 6000×0.25 = 3000
+
+If the contract is fully fixed consideration, return an empty variableConsideration array. Don't fabricate components.
 
 Step 4 — Allocate to POs by standalone selling price (SSP). When the contract states SSPs explicitly, use them. When it states only a bundled price, ESTIMATE each SSP based on what each component would cost separately in the market (adjusted-market approach) and explain. A common pattern: list price for one component, residual approach for the other.
 
@@ -185,9 +283,9 @@ Other rules:
 
 - Dates are ISO YYYY-MM-DD. Contracts often state "effective" and "term" — use those for contractStartDate/contractEndDate.
 - POs inherit the contract's start/end unless the contract states otherwise (e.g. "implementation by Q1").
-- totalContractValue is what the customer PAYS, not Σ SSP. They differ when there's a discount or premium.
+- totalContractValue is the BASELINE the customer would pay before variable consideration, not Σ SSP. (Σ SSP differs when there's a discount or premium; the adjusted transaction price the engine allocates = totalContractValue + Σ(signed constrainedAmount across ACTIVE variable consideration).)
 - Be conservative about SSPs you estimate. If the rationale would be "I'm guessing," say so in notes so the human can override.
-- If a contract has variable consideration (overages, performance bonuses, refunds), flag it in notes — the v0.1/v0.2 engine doesn't model it yet.
+- Variable consideration: see Step 3 — emit every detected component in the variableConsideration array, NOT in notes. Empty array if the contract is fully fixed.
 - If a contract has modifications, prior amendments, or unusual termination terms, flag in notes.
 
 You are an extraction assistant. A human CPA reviews everything you produce before it touches the ledger. Be precise; surface your uncertainty.`;

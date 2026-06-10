@@ -10,6 +10,7 @@
 // All read-only in v0.1. The "Post next period" + "Re-run AI extractor"
 // actions land in v0.2.
 
+import * as React from "react";
 import Link from "next/link";
 import { Decimal } from "decimal.js";
 import { notFound } from "next/navigation";
@@ -18,16 +19,25 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, formatMonth, formatPercent } from "@/lib/utils/format";
+import { UsageControls } from "./usage-controls";
 import { classifyContractEconomics } from "@/lib/accounting/allocator";
 import { ExtractionPanel, PostRecognitionButton } from "./contract-actions";
+import { VariableConsiderationPanel } from "./variable-consideration-panel";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function ContractDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const contract = await prisma.revenueContract.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read. Without
+  // this, a signed-in user could navigate to /contracts/[any-uuid] and
+  // read the full rawText of any tenant's contract — PII, pricing,
+  // contractual terms. The most sensitive single read leak in this repo.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const contract = await prisma.revenueContract.findFirst({
+    where: { id: params.id, entity: { tenantId: tenant.id } },
     include: {
       customer: { select: { displayName: true, code: true } },
       performanceObligations: { orderBy: { sequenceNo: "asc" } },
@@ -38,6 +48,23 @@ export default async function ContractDetailPage({
         orderBy: [{ obligationId: "asc" }, { periodStart: "asc" }],
       },
       document: { select: { filename: true, format: true, rawText: true } },
+      variableConsiderations: {
+        orderBy: { createdAt: "asc" },
+        include: {
+          obligation: { select: { sequenceNo: true, description: true } },
+          reassessments: {
+            orderBy: { reassessedAt: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              catchUpAmount: true,
+              postedEventId: true,
+              postedAt: true,
+            },
+          },
+          _count: { select: { reassessments: true } },
+        },
+      },
     },
   });
   if (!contract) notFound();
@@ -148,21 +175,36 @@ export default async function ContractDetailPage({
                   ? new Decimal(0)
                   : allocated.dividedBy(totalDecimal).times(100);
                 return (
-                  <TR key={po.id}>
-                    <TD className="text-ink-400">{po.sequenceNo}</TD>
-                    <TD className="text-ink-900">{po.description}</TD>
-                    <TD>
-                      <Badge tone="info">{po.recognitionPattern}</Badge>
-                    </TD>
-                    <TD className="text-xs text-ink-500">
-                      {formatDate(po.startDate)}
-                      {po.endDate ? ` → ${formatDate(po.endDate)}` : ""}
-                    </TD>
-                    <TD className="font-mono text-xs">{po.revenueAccountCode}</TD>
-                    <TD className="font-mono text-xs">{po.deferredAccountCode}</TD>
-                    <TD className="amount-cell text-right">{formatMoney(allocated)}</TD>
-                    <TD className="text-right text-ink-700">{formatPercent(pct)}</TD>
-                  </TR>
+                  <React.Fragment key={po.id}>
+                    <TR>
+                      <TD className="text-ink-400">{po.sequenceNo}</TD>
+                      <TD className="text-ink-900">{po.description}</TD>
+                      <TD>
+                        <Badge tone="info">{po.recognitionPattern}</Badge>
+                      </TD>
+                      <TD className="text-xs text-ink-500">
+                        {formatDate(po.startDate)}
+                        {po.endDate ? ` → ${formatDate(po.endDate)}` : ""}
+                      </TD>
+                      <TD className="font-mono text-xs">{po.revenueAccountCode}</TD>
+                      <TD className="font-mono text-xs">{po.deferredAccountCode}</TD>
+                      <TD className="amount-cell text-right">{formatMoney(allocated)}</TD>
+                      <TD className="text-right text-ink-700">{formatPercent(pct)}</TD>
+                    </TR>
+                    {po.recognitionPattern === "OVER_TIME_USAGE" && (
+                      <TR>
+                        <TD colSpan={8}>
+                          <UsageControls
+                            obligationId={po.id}
+                            pricePerUnit={
+                              po.pricePerUnit ? po.pricePerUnit.toString() : null
+                            }
+                            unitName={po.unitName}
+                          />
+                        </TD>
+                      </TR>
+                    )}
+                  </React.Fragment>
                 );
               })}
               <TR className="bg-ink-50 font-medium">
@@ -189,6 +231,53 @@ export default async function ContractDetailPage({
         </CardHeader>
         <CardContent>
           <ExtractionPanel contractId={contract.id} hasDocument={!!contract.document} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Variable consideration (ASC 606 Step 3)</CardTitle>
+          <span className="text-xs text-ink-500">
+            Bonuses, refund rights, volume rebates, and other variable amounts.
+            Each component is estimated (expected value or most-likely amount),
+            constrained per ASC 606-10-32-11, and reassessed each period. Changes
+            in estimate post as cumulative catch-ups to revenue.
+          </span>
+        </CardHeader>
+        <CardContent>
+          <VariableConsiderationPanel
+            contractId={contract.id}
+            obligations={contract.performanceObligations.map((po) => ({
+              id: po.id,
+              sequenceNo: po.sequenceNo,
+              description: po.description,
+            }))}
+            components={contract.variableConsiderations.map((v) => ({
+              id: v.id,
+              description: v.description,
+              method: v.method,
+              direction: v.direction,
+              status: v.status,
+              currentConstrainedAmount: v.currentConstrainedAmount.toString(),
+              currentUnconstrainedAmount: v.currentUnconstrainedAmount.toString(),
+              constraintRationale: v.constraintRationale,
+              resolvedAmount: v.resolvedAmount ? v.resolvedAmount.toString() : null,
+              obligationLabel: v.obligation
+                ? `PO #${v.obligation.sequenceNo} — ${v.obligation.description}`
+                : null,
+              reassessmentCount: v._count.reassessments,
+              latestReassessment: v.reassessments[0]
+                ? {
+                    id: v.reassessments[0].id,
+                    catchUpAmount: v.reassessments[0].catchUpAmount
+                      ? v.reassessments[0].catchUpAmount.toString()
+                      : null,
+                    posted: v.reassessments[0].postedEventId != null,
+                    postedAt: v.reassessments[0].postedAt?.toISOString() ?? null,
+                  }
+                : null,
+            }))}
+          />
         </CardContent>
       </Card>
 

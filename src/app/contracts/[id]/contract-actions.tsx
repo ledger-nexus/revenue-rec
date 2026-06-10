@@ -86,6 +86,26 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
           revenueAccountCode: po.revenueAccountCode,
           deferredAccountCode: po.deferredAccountCode,
         })),
+        // Pass the AI-proposed variable consideration through. The
+        // server reverses any existing ACTIVE VC on the contract,
+        // creates new rows for these, and re-runs the allocator
+        // against the new transaction price. Empty array means "AI
+        // saw no variable consideration" — also a valid signal.
+        variableConsideration: (proposal.variableConsideration ?? []).map((vc) => ({
+          description: vc.description,
+          method: vc.method,
+          direction: vc.direction,
+          unconstrainedAmount: vc.unconstrainedAmount,
+          constrainedAmount: vc.constrainedAmount,
+          constraintRationale: vc.constraintRationale,
+          outcomes: vc.outcomes && vc.outcomes.length > 0
+            ? vc.outcomes.map((o) => ({
+                scenario: o.scenario,
+                amount: o.amount,
+                probabilityPercent: o.probabilityPercent,
+              }))
+            : undefined,
+        })),
         totalContractValue: proposal.totalContractValue,
         contractStartDate: proposal.contractStartDate,
         contractEndDate: proposal.contractEndDate,
@@ -177,6 +197,144 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
               ))}
             </tbody>
           </table>
+          {proposal.variableConsideration && proposal.variableConsideration.length > 0 ? (
+            <div className="rounded-md border border-ai/30 bg-violet-50 p-2">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-ink-600">
+                Variable consideration (ASC 606 Step 3) — {proposal.variableConsideration.length}{" "}
+                component{proposal.variableConsideration.length === 1 ? "" : "s"}
+              </div>
+              <table className="w-full text-xs">
+                <thead className="text-ink-500">
+                  <tr>
+                    <th className="px-1 py-1 text-left">Description</th>
+                    <th className="px-1 py-1 text-left">Direction</th>
+                    <th className="px-1 py-1 text-left">Method</th>
+                    <th className="px-1 py-1 text-right">Unconstrained</th>
+                    <th className="px-1 py-1 text-right">Constrained</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {proposal.variableConsideration.map((vc, i) => (
+                    <tr key={i} className="border-t border-ink-100">
+                      <td className="px-1 py-1">{vc.description}</td>
+                      <td className="px-1 py-1">
+                        <Badge tone={vc.direction === "INCREASE" ? "positive" : "warning"}>
+                          {vc.direction === "INCREASE" ? "↑ Increase" : "↓ Decrease"}
+                        </Badge>
+                      </td>
+                      <td className="px-1 py-1 font-mono text-[10px]">
+                        {vc.method === "EXPECTED_VALUE" ? "EXP_VAL" : "MOST_LIKELY"}
+                      </td>
+                      <td className="amount-cell px-1 py-1 text-right">
+                        {vc.unconstrainedAmount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </td>
+                      <td className="amount-cell px-1 py-1 text-right">
+                        {vc.constrainedAmount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <details className="mt-1 text-[11px] text-ink-600">
+                <summary className="cursor-pointer">Constraint rationales</summary>
+                <ul className="mt-1 list-disc pl-5">
+                  {proposal.variableConsideration.map((vc, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{vc.description}:</span>{" "}
+                      {vc.constraintRationale}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+              {/* EXPECTED_VALUE outcomes — show the math behind
+                  unconstrainedAmount when the AI provided it. */}
+              {proposal.variableConsideration.some(
+                (vc) => vc.outcomes && vc.outcomes.length > 0
+              ) ? (
+                <details className="mt-1 text-[11px] text-ink-600">
+                  <summary className="cursor-pointer">
+                    Expected-value scenarios
+                  </summary>
+                  <div className="mt-1 flex flex-col gap-1.5">
+                    {proposal.variableConsideration
+                      .filter((vc) => vc.outcomes && vc.outcomes.length > 0)
+                      .map((vc, i) => {
+                        const weighted = vc.outcomes!.reduce(
+                          (acc, o) => acc + o.amount * (o.probabilityPercent / 100),
+                          0
+                        );
+                        return (
+                          <div key={i} className="rounded border border-ink-200 bg-white p-1.5">
+                            <div className="font-medium text-ink-700">
+                              {vc.description}
+                            </div>
+                            <table className="mt-0.5 w-full text-[10px]">
+                              <thead className="text-ink-500">
+                                <tr>
+                                  <th className="px-1 text-left">Scenario</th>
+                                  <th className="px-1 text-right">Prob</th>
+                                  <th className="px-1 text-right">Amount</th>
+                                  <th className="px-1 text-right">Contribution</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {vc.outcomes!.map((o, j) => (
+                                  <tr key={j} className="border-t border-ink-100">
+                                    <td className="px-1 py-0.5">{o.scenario}</td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {o.probabilityPercent.toFixed(1)}%
+                                    </td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {o.amount.toLocaleString("en-US", {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}
+                                    </td>
+                                    <td className="px-1 py-0.5 text-right amount-cell">
+                                      {(
+                                        o.amount * (o.probabilityPercent / 100)
+                                      ).toLocaleString("en-US", {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}
+                                    </td>
+                                  </tr>
+                                ))}
+                                <tr className="border-t border-ink-200 bg-ink-50">
+                                  <td className="px-1 py-0.5 font-medium" colSpan={3}>
+                                    Σ contributions = expected value
+                                  </td>
+                                  <td className="px-1 py-0.5 text-right amount-cell font-medium">
+                                    {weighted.toLocaleString("en-US", {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                            {Math.abs(weighted - vc.unconstrainedAmount) > 0.5 ? (
+                              <div className="mt-0.5 text-[10px] text-amber-700">
+                                ⚠ AI's unconstrainedAmount (
+                                {vc.unconstrainedAmount.toFixed(2)}) doesn't
+                                match Σ contributions ({weighted.toFixed(2)}).
+                                Reviewer should reconcile before approving.
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
           <details className="text-xs text-ink-600">
             <summary className="cursor-pointer">Rationales per PO</summary>
             <ul className="mt-1 list-disc pl-5">
@@ -201,8 +359,11 @@ export function ExtractionPanel({ contractId, hasDocument }: Props) {
             </Button>
           </div>
           <div className="text-[11px] text-ink-500">
-            Approval wipes the current POs + schedule and regenerates them from the
-            allocator using the SSPs above. Already-posted RecognitionEvents survive.
+            Approval wipes the current POs + schedule and regenerates them from
+            the allocator using the SSPs above. Existing ACTIVE variable
+            consideration is REVERSED (audit history preserved) and the AI's
+            components are created as fresh ACTIVE rows. Already-posted
+            RecognitionEvents survive.
           </div>
         </div>
       ) : null}

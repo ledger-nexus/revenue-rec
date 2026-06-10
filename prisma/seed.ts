@@ -28,9 +28,10 @@ async function main() {
 
   // 1. Confirm NORTHWIND entity exists (created by ledger-core seed).
   // ledger-core Phase 4b: legalEntity.code unique per [tenantId, code]; findFirst.
+  // The seed also needs entity.tenantId to stamp the contract row (CC6.1).
   const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
-    select: { id: true },
+    select: { id: true, tenantId: true },
   });
   if (!entity) {
     console.error(
@@ -91,6 +92,7 @@ async function main() {
 
   const contract = await prisma.revenueContract.create({
     data: {
+      tenantId: entity.tenantId,
       entityId: entity.id,
       code: "INITECH-2026-01",
       description: "Initech 2026 SaaS subscription + implementation",

@@ -1,8 +1,17 @@
 # CI for revenue-rec.
 #
-# tsc + unit tests on every PR / push to main. Tests here are pure-
-# function (allocator, schedule generator, AI extractor with mocked
-# SDK, ledger-bridge with mocked fetch) — no DB required.
+# Two jobs:
+#
+#   test  — tsc + unit tests on every PR / push to main. Tests here
+#           are pure-function (allocator, schedule generator, AI
+#           extractor with mocked SDK, ledger-bridge with mocked
+#           fetch) — no DB required.
+#
+#   smoke — end-to-end via scripts/smoke-test-e2e.ts. Runs against
+#           real infrastructure (Anthropic API + live ledger-core
+#           server + Postgres). Manual trigger only — controls
+#           Anthropic API spend and lets the operator decide when
+#           ledger-core staging is up.
 #
 # Production deployment is via Vercel's GitHub integration. See
 # ledger-core/docs/DEPLOY.md.
@@ -32,3 +41,52 @@ jobs:
         run: npx tsc --noEmit
       - name: Unit tests
         run: npx vitest run
+
+  smoke:
+    # Manual trigger only. Costs real Anthropic API tokens (~$0.05
+    # per run as of Opus 4.7 list pricing) and requires a live
+    # ledger-core staging deployment.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: revenue_rec_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Repo / org secrets (configure in GitHub Settings → Secrets and
+      # variables → Actions):
+      #   ANTHROPIC_API_KEY           — for the AI extractor
+      #   LEDGER_CORE_URL             — staging URL (e.g., https://ledger-core-staging.vercel.app)
+      #   LEDGER_CORE_INTERNAL_TOKEN  — matches ledger-core's deployment env
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LEDGER_CORE_URL: ${{ secrets.LEDGER_CORE_URL }}
+      LEDGER_CORE_INTERNAL_TOKEN: ${{ secrets.LEDGER_CORE_INTERNAL_TOKEN }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/revenue_rec_smoke?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci
+      - name: Provision schema
+        run: npx prisma db push --skip-generate
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Seed database
+        # The seed script creates a tenant + entity + contract +
+        # document so the smoke script has something to extract.
+        run: npm run db:seed
+      - name: Run smoke test
+        run: npx tsx scripts/smoke-test-e2e.ts

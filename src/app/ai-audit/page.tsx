@@ -24,6 +24,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 const OPUS_INPUT_PER_M = 5.0;
 const OPUS_OUTPUT_PER_M = 25.0;
@@ -36,17 +37,42 @@ interface ExtractedPoJson {
   rationale?: string;
 }
 
+interface ExtractedVcOutcomeJson {
+  scenario: string;
+  amount: number;
+  probabilityPercent: number;
+}
+
+interface ExtractedVcJson {
+  description: string;
+  method: "EXPECTED_VALUE" | "MOST_LIKELY_AMOUNT";
+  direction: "INCREASE" | "DECREASE";
+  unconstrainedAmount: number;
+  constrainedAmount: number;
+  constraintRationale: string;
+  outcomes?: ExtractedVcOutcomeJson[];
+}
+
 export default async function AiAuditPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the tenantId
+  // column on AiExtractionSuggestion. Legacy rows (created before this
+  // column was added) have null tenantId and are filtered out — backfill
+  // via prisma/backfill-ai-extraction-suggestion-tenant.sql.
+  const tenant = await getCurrentTenant();
   const suggestions = await prisma.aiExtractionSuggestion.findMany({
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 200,
     select: {
       id: true,
       contractId: true,
       obligationsJson: true,
+      variableConsiderationJson: true,
       modelName: true,
       promptTokens: true,
       completionTokens: true,
+      cacheReadTokens: true,
+      cacheCreationTokens: true,
       latencyMs: true,
       createdAt: true,
       contract: {
@@ -66,11 +92,32 @@ export default async function AiAuditPage() {
     (s, x) => s + (x.completionTokens ?? 0),
     0
   );
+  const totalCacheReadTokens = suggestions.reduce(
+    (s, x) => s + (x.cacheReadTokens ?? 0),
+    0
+  );
+  const totalCacheCreationTokens = suggestions.reduce(
+    (s, x) => s + (x.cacheCreationTokens ?? 0),
+    0
+  );
   const totalLatencyMs = suggestions.reduce((s, x) => s + (x.latencyMs ?? 0), 0);
   const avgLatencyMs = totalRuns > 0 ? Math.round(totalLatencyMs / totalRuns) : 0;
+  // Cost estimate: cache reads bill at ~10% of normal input rate per
+  // Anthropic. Cache writes bill at 1.25× input rate. Non-cached
+  // input bills at full rate. Output always bills at output rate.
+  const uncachedInputTokens = totalPromptTokens - totalCacheReadTokens;
   const estimatedCostUsd =
-    (totalPromptTokens / 1_000_000) * OPUS_INPUT_PER_M +
+    (uncachedInputTokens / 1_000_000) * OPUS_INPUT_PER_M +
+    (totalCacheReadTokens / 1_000_000) * (OPUS_INPUT_PER_M * 0.1) +
+    (totalCacheCreationTokens / 1_000_000) * (OPUS_INPUT_PER_M * 1.25) +
     (totalCompletionTokens / 1_000_000) * OPUS_OUTPUT_PER_M;
+  // Cache-hit rate: cached input tokens as a fraction of total input.
+  // A high rate (>80%) means the system prompt is being reused
+  // effectively — system prompt edits invalidate the cache.
+  const cacheHitRate =
+    totalPromptTokens > 0
+      ? (totalCacheReadTokens / totalPromptTokens) * 100
+      : 0;
 
   const acceptedCount = suggestions.filter(
     (s) => s.contract.status === "ACTIVE"
@@ -79,6 +126,24 @@ export default async function AiAuditPage() {
 
   // Distinct contracts the AI has touched.
   const uniqueContracts = new Set(suggestions.map((s) => s.contractId)).size;
+
+  // Variable consideration: how often the AI surfaced ASC 606 Step 3
+  // components, and how many used EXPECTED_VALUE outcomes.
+  let totalVcComponents = 0;
+  let totalEvComponents = 0;
+  let totalEvOutcomes = 0;
+  let runsWithVc = 0;
+  for (const s of suggestions) {
+    const vcs = (s.variableConsiderationJson as unknown as ExtractedVcJson[] | null) ?? [];
+    if (vcs.length > 0) runsWithVc += 1;
+    totalVcComponents += vcs.length;
+    for (const vc of vcs) {
+      if (vc.method === "EXPECTED_VALUE") {
+        totalEvComponents += 1;
+        totalEvOutcomes += vc.outcomes?.length ?? 0;
+      }
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -104,13 +169,13 @@ export default async function AiAuditPage() {
           hint={`${totalPromptTokens.toLocaleString()} in / ${totalCompletionTokens.toLocaleString()} out`}
         />
         <Metric
-          label="Est. cost (uncached)"
+          label="Est. cost"
           value={`$${estimatedCostUsd.toFixed(4)}`}
-          hint="Opus 4.7 list pricing; cache reads would reduce"
+          hint="Opus 4.7 list pricing; cache reads bill at 10%, writes at 1.25×"
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Metric label="Avg latency" value={`${avgLatencyMs}ms`} />
         <Metric
           label="Unique contracts"
@@ -118,9 +183,40 @@ export default async function AiAuditPage() {
           hint="Contracts the AI has read at least once"
         />
         <Metric
+          label="Cache-hit rate"
+          value={`${cacheHitRate.toFixed(0)}%`}
+          hint={`${totalCacheReadTokens.toLocaleString()} cached / ${totalPromptTokens.toLocaleString()} input`}
+        />
+        <Metric
           label="Model"
           value={suggestions[0]?.modelName ?? "—"}
           hint="Most recent run"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Metric
+          label="Variable consideration runs"
+          value={String(runsWithVc)}
+          hint={`${totalVcComponents} components total`}
+        />
+        <Metric
+          label="EXPECTED_VALUE components"
+          value={String(totalEvComponents)}
+          hint={`${totalEvOutcomes} outcomes documented`}
+        />
+        <Metric
+          label="Cache creation"
+          value={totalCacheCreationTokens.toLocaleString()}
+          hint="Tokens written to cache (priming runs)"
+        />
+        <Metric
+          label="Avg tokens per run"
+          value={
+            totalRuns > 0
+              ? Math.round((totalPromptTokens + totalCompletionTokens) / totalRuns).toLocaleString()
+              : "—"
+          }
         />
       </div>
 
@@ -145,7 +241,9 @@ export default async function AiAuditPage() {
                   <TH>Contract</TH>
                   <TH>Customer</TH>
                   <TH>Status</TH>
-                  <TH className="text-right">POs proposed</TH>
+                  <TH className="text-right">POs</TH>
+                  <TH className="text-right">VC</TH>
+                  <TH>Cache</TH>
                   <TH className="text-right">Tokens</TH>
                   <TH className="text-right">Latency</TH>
                 </tr>
@@ -154,6 +252,21 @@ export default async function AiAuditPage() {
                 {suggestions.map((s) => {
                   const obligations =
                     (s.obligationsJson as unknown as ExtractedPoJson[]) ?? [];
+                  const vcs =
+                    (s.variableConsiderationJson as unknown as ExtractedVcJson[] | null) ?? [];
+                  const evCount = vcs.filter((v) => v.method === "EXPECTED_VALUE").length;
+                  // Per-run cache shape:
+                  //   HIT  — cacheReadTokens > 0 (system prefix served from cache)
+                  //   MISS — cacheCreationTokens > 0 (prefix written this call)
+                  //   —    — both null (legacy row OR no caching configured)
+                  const cacheRead = s.cacheReadTokens ?? 0;
+                  const cacheWrite = s.cacheCreationTokens ?? 0;
+                  const cacheBadge =
+                    cacheRead > 0
+                      ? { tone: "positive" as const, label: "HIT" }
+                      : cacheWrite > 0
+                        ? { tone: "warning" as const, label: "MISS" }
+                        : null;
                   return (
                     <TR key={s.id}>
                       <TD className="text-xs text-ink-500">
@@ -184,6 +297,30 @@ export default async function AiAuditPage() {
                         </Badge>
                       </TD>
                       <TD className="text-right text-ink-700">{obligations.length}</TD>
+                      <TD className="text-right text-ink-700">
+                        {vcs.length > 0 ? (
+                          <span>
+                            {vcs.length}
+                            {evCount > 0 ? (
+                              <span
+                                className="ml-1 text-[10px] text-ink-500"
+                                title={`${evCount} EXPECTED_VALUE`}
+                              >
+                                ({evCount} EV)
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="text-ink-400">—</span>
+                        )}
+                      </TD>
+                      <TD>
+                        {cacheBadge ? (
+                          <Badge tone={cacheBadge.tone}>{cacheBadge.label}</Badge>
+                        ) : (
+                          <span className="text-[10px] text-ink-400">—</span>
+                        )}
+                      </TD>
                       <TD className="text-right text-xs text-ink-600">
                         {((s.promptTokens ?? 0) + (s.completionTokens ?? 0)).toLocaleString()}
                       </TD>

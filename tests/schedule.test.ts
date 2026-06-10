@@ -102,19 +102,29 @@ describe("generateSchedule: OVER_TIME_STRAIGHT", () => {
   });
 });
 
-describe("generateSchedule: unsupported patterns", () => {
-  it("OVER_TIME_USAGE throws — lands in v0.2", () => {
-    expect(() =>
-      generateSchedule({
-        pattern: "OVER_TIME_USAGE",
-        allocatedAmount: 100,
-        startDate: new Date("2026-01-01"),
-        endDate: new Date("2026-12-31"),
-      })
-    ).toThrow(/v0\.2/);
+describe("generateSchedule: usage-based recognition", () => {
+  it("OVER_TIME_USAGE returns [] — schedule rows accrete from recordUsageAction", () => {
+    const rows = generateSchedule({
+      pattern: "OVER_TIME_USAGE",
+      allocatedAmount: 100,
+      startDate: new Date("2026-01-01"),
+      endDate: new Date("2026-12-31"),
+    });
+    expect(rows).toEqual([]);
   });
 
-  it("OVER_TIME_MILESTONE throws — lands in v0.2", () => {
+  it("OVER_TIME_USAGE doesn't require endDate (subscription has no terminal date for usage)", () => {
+    const rows = generateSchedule({
+      pattern: "OVER_TIME_USAGE",
+      allocatedAmount: 0,
+      startDate: new Date("2026-01-01"),
+    });
+    expect(rows).toEqual([]);
+  });
+});
+
+describe("generateSchedule: still-unsupported patterns", () => {
+  it("OVER_TIME_MILESTONE throws — milestone-based recognition is future work", () => {
     expect(() =>
       generateSchedule({
         pattern: "OVER_TIME_MILESTONE",
@@ -122,7 +132,7 @@ describe("generateSchedule: unsupported patterns", () => {
         startDate: new Date("2026-01-01"),
         endDate: new Date("2026-12-31"),
       })
-    ).toThrow(/v0\.2/);
+    ).toThrow();
   });
 });
 

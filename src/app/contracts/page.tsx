@@ -7,9 +7,15 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function ContractsListPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this filter, the list would show every contract across
+  // every tenant.
+  const tenant = await getCurrentTenant();
   const contracts = await prisma.revenueContract.findMany({
+    where: tenant ? { entity: { tenantId: tenant.id } } : { id: "__none__" },
     select: {
       id: true,
       code: true,
