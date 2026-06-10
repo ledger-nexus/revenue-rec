@@ -13,6 +13,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 
 // Sentinel UUIDs stable across runs so cleanup works after a crash.
@@ -38,6 +40,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   // Reuse NORTHWIND entity. Don't own the tenant chain.
@@ -111,11 +114,12 @@ async function createContract(args: {
 }
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("revenueRecAttribution — integration vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("revenueRecAttribution — integration vs real Postgres", () => {
   it("returns empty-but-valid shape for a user with no revenue-rec activity", async () => {
     const { revenueRecAttribution } = await import(
       "../src/lib/privacy/rr-attribution"
@@ -295,18 +299,47 @@ describe("revenueRecAttribution — integration vs real Postgres", () => {
     expect(otherResult.recognitionSchedulesApproved).toBe(1);
   });
 
-  it("schema-gap fields stay zero even with seeded data (honest-gap enforcement)", async () => {
-    // Even with contracts + AiExtractionSuggestions present, the three
-    // gap fields must be exactly zero. If a future PR wires them, this
-    // test will fail and force the contract to be re-documented.
+  it("aiExtractionsAccepted counts suggestions with acceptedBy = subject (2026-06-05 full-wire)", async () => {
     const contract = await prisma.revenueContract.findFirstOrThrow({
       where: { code: `DSR-RR-${SUFFIX}-A` },
+    });
+    // Two suggestions accepted by TEST_SUBJECT.
+    await prisma.aiExtractionSuggestion.create({
+      data: {
+        contractId: contract.id,
+        obligationsJson: { test: "accepted-1" },
+        modelName: "claude-opus-4-7",
+        acceptedBy: TEST_SUBJECT_ID,
+        acceptedAt: new Date(),
+      },
     });
     await prisma.aiExtractionSuggestion.create({
       data: {
         contractId: contract.id,
-        obligationsJson: { test: "data" },
+        obligationsJson: { test: "accepted-2" },
         modelName: "claude-opus-4-7",
+        acceptedBy: TEST_SUBJECT_ID,
+        acceptedAt: new Date(),
+      },
+    });
+    // One suggestion accepted by OTHER_SUBJECT (proves filtering).
+    await prisma.aiExtractionSuggestion.create({
+      data: {
+        contractId: contract.id,
+        obligationsJson: { test: "other-accepted" },
+        modelName: "claude-opus-4-7",
+        acceptedBy: OTHER_SUBJECT_ID,
+        acceptedAt: new Date(),
+      },
+    });
+    // One suggestion rejected by TEST_SUBJECT.
+    await prisma.aiExtractionSuggestion.create({
+      data: {
+        contractId: contract.id,
+        obligationsJson: { test: "rejected" },
+        modelName: "claude-opus-4-7",
+        rejectedBy: TEST_SUBJECT_ID,
+        rejectedAt: new Date(),
       },
     });
 
@@ -315,9 +348,10 @@ describe("revenueRecAttribution — integration vs real Postgres", () => {
     );
     const result = await revenueRecAttribution(prisma, TEST_SUBJECT_ID);
 
+    expect(result.aiExtractionsAccepted).toBe(2);
+    expect(result.aiExtractionsRejected).toBe(1);
+    // revenueContractsCreated still 0 (delegated to ledger-core audit_log).
     expect(result.revenueContractsCreated).toBe(0);
-    expect(result.aiExtractionsAccepted).toBe(0);
-    expect(result.aiExtractionsRejected).toBe(0);
   });
 
   it("HARD INVARIANT: returned object contains no rawText / counterparty PII", async () => {
