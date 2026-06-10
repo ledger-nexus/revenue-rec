@@ -11,6 +11,7 @@ export function Sidebar() {
       </div>
       <NavLink href="/">Dashboard</NavLink>
       <NavLink href="/contracts">Contracts</NavLink>
+      <NavLink href="/import/netsuite">Import NS</NavLink>
       <NavLink href="/ai-audit">AI usage</NavLink>
     </aside>
   );

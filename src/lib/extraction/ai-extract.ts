@@ -91,6 +91,39 @@ const ExtractedPoSchema = z.object({
     .describe(
       "Why you identified this as a distinct PO, how you derived the SSP, and the basis for the recognition pattern. One sentence each, concrete."
     ),
+  // ─── ASC 606 ¶78 allocation + ¶77 fair-value evidence (optional, 2026-06-04) ───
+  // Surface these when the contract makes them explicit; leave null
+  // otherwise. The recognition allocator treats null `allocatedAmount`
+  // as "fall back to SSP" — preserving v0.2 semantics for extractions
+  // that don't surface these fields.
+  allocatedAmount: z
+    .number()
+    .nullable()
+    .optional()
+    .describe(
+      "ASC 606 ¶78 allocated transaction price for this PO. Set when the contract explicitly allocates a different amount than SSP (e.g., residual method or auditor-required override). Leave null when SSP IS the allocated amount (proportional-to-SSP default)."
+    ),
+  allocationMethod: z
+    .enum(["PROPORTIONAL", "RESIDUAL", "MANUAL"])
+    .nullable()
+    .optional()
+    .describe(
+      "PROPORTIONAL = relative-SSP (the default and dominant case). RESIDUAL = total minus observable SSPs of other POs (permitted when SSP for one PO is highly uncertain). MANUAL = auditor-required override. Leave null when unspecified."
+    ),
+  fairValueMethod: z
+    .enum(["ESP", "VSOE", "TPE", "RESIDUAL"])
+    .nullable()
+    .optional()
+    .describe(
+      "ASC 606 ¶77 fair-value evidence hierarchy. ESP = Estimated Selling Price (most common; we estimate based on cost/margin). VSOE = Vendor-Specific Objective Evidence (we sell it standalone at this price elsewhere). TPE = Third-Party Evidence (competitor pricing). RESIDUAL = derived via the residual approach. Leave null when unspecified."
+    ),
+  quantity: z
+    .number()
+    .nullable()
+    .optional()
+    .describe(
+      "Item quantity. Defaults to 1 — the dominant case where SSP carries the per-line total. Set explicitly when SSP is per-unit (e.g., \"500 seats at $20/mo = $10,000/mo SSP per seat would be $20\"). The recognition engine multiplies (SSP × quantity) when computing schedule amounts."
+    ),
 });
 
 const ExtractionResponseSchema = z.object({
@@ -132,6 +165,10 @@ const ExtractionResponseSchema = z.object({
 
 export type ExtractedPo = z.infer<typeof ExtractedPoSchema>;
 export type ExtractionResponse = z.infer<typeof ExtractionResponseSchema>;
+// Exported for tests + downstream callers that want to validate
+// arbitrary JSON against the extracted-PO shape (e.g., NetSuite
+// import path reusing the same surface).
+export { ExtractedPoSchema, ExtractionResponseSchema };
 
 export interface ExtractionResult {
   extracted: ExtractionResponse;

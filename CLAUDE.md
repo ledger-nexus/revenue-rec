@@ -1,3 +1,18 @@
+<!-- BEGIN multi-session-orchestrator amendment (v1) -->
+
+## ⚠️ Multi-session coordination (READ FIRST)
+
+This repo may have parallel Claude sessions — they clobber each other's writes without coordination.
+
+1. **Read `STATUS.md`** at the repo root before editing any file. If your task overlaps an active claim, pick a different task or surface the conflict to the user.
+2. **Claim your scope** before your first edit: append a `### Session <id>` block to STATUS.md under "Active claims" with scope / files-globs / branch / heartbeat (format documented in STATUS.md). Commit STATUS.md atomically.
+3. **Heartbeat** every ~20 turns. Small commit.
+4. **Release** at session end: move your block to "Recent completions" with an outcome line. Commit.
+
+Never edit another session's claim, skip the read, or claim `**`.
+
+<!-- END multi-session-orchestrator amendment -->
+
 # Claude Code Instructions for revenue-rec
 
 Auto-loaded by Claude Code on every session in this repo.
@@ -19,6 +34,19 @@ The architecture canon is `docs/ARCHITECTURE.md`.
 3. **The deterministic core stays deterministic.** SSP allocator (`src/lib/accounting/allocator.ts`) and schedule generator (`src/lib/accounting/schedule.ts`) are pure functions with no DB access, no model calls. The AI lives ONLY in the extractor (v0.2+), and even then it produces structured proposals that humans approve before the deterministic engine takes over.
 
 4. **Penny-perfect totals.** The allocator and schedule generator both round per-element to 2dp and absorb the cumulative rounding residual on the last element so Σ allocations ≡ totalContractValue and Σ schedule periods ≡ allocated amount, exactly. Tests assert this.
+
+5. **All error emission goes through the monitoring shim.** `src/lib/monitoring/index.ts` is the canonical path — `captureError(err, context)` / `captureMessage(msg, level, context)`. Every emit runs `redactPii()` before the error reaches Sentry or the console fallback. **Never call Sentry directly + never console.error a Prisma error's `.message`** — the column-value embedding pattern is real (`ContractDocument.rawText` is the highest-sensitivity column in the portfolio; counterparty names + contract terms would leak verbatim). The shim's `sanitizeErrorForCapture()` strips the V8 stack preamble so `.message` PII can't leak via `.stack` (14th adversarial pass closure 2026-06-05). Add new field names to `src/lib/soc2/redact-pii.ts` allowlist when new sensitive columns ship — `signatoryEmail`, `contractNumber`, etc. were added in the 14th-pass closure.
+
+## SOC 2 + adversarial-pass cadence
+
+This repo is part of the ledger-nexus portfolio's SOC 2 Type 2 readiness program. Current state (per `ledger-core/docs/SOC2_READINESS.md`): **≈80% to Type 1 audit-ready**.
+
+**Adversarial-pass discipline:** every substantive code shipment (NS mapper sprints, AI extractor changes, monitoring code, anything cross-tenant-touching) should be followed by an adversarial-pass audit before merge. The portfolio has run **14 adversarial passes** to date; the most recent two found real HIGHs in newly-shipped code:
+
+- **13th pass (2026-06-05 morning):** found unbacked `revenueContractsCreated` audit_log delegation claim in `rr-attribution.ts` (Privacy TSC accuracy issue) — closed via revenue-rec PR #27
+- **14th pass (2026-06-05 night):** found Error.stack PII leak via V8 preamble + revenue-rec PII allowlist gaps (`signatoryEmail`, `contractNumber`, `purchaseOrderNumber`, `invoiceNumber`) — closed via revenue-rec PR #28 2nd commit
+
+The cadence is the evidence: SOC 2 CC4 (Monitoring Activities) auditors grade "this team finds + closes their own weaknesses." A self-discovered HIGH closed in-session with tests pinning the attack scenario is the highest-confidence CC4 evidence form. **When you ship something load-bearing, run an adversarial pass before declaring done.**
 
 ## What's wired (v0.2)
 
