@@ -6,11 +6,15 @@
 // (suffix-namespaced, cascade-friendly).
 //
 // Requires DATABASE_URL + seeded NORTHWIND entity + at least one Party.
+// CI's test job is DB-free, so the whole suite skips (not fails) when
+// DATABASE_URL is absent — same pattern as recon's ignore-line suite.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { importFromNsRevenue } from "../src/lib/mappers/netsuite";
 import type { NsRevenueArrangement } from "../src/lib/mappers/netsuite";
+
+const HAS_DB = !!process.env.DATABASE_URL;
 
 const prisma = new PrismaClient();
 const SUFFIX = "nsint" + Date.now().toString(36);
@@ -27,6 +31,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
@@ -47,6 +52,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
@@ -82,7 +88,7 @@ function makeArrangement(code: string): NsRevenueArrangement {
   };
 }
 
-describe("importFromNsRevenue — integration vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("importFromNsRevenue — integration vs real Postgres", () => {
   it("creates a RevenueContract + PerformanceObligation row end-to-end (schema-mirror gap closed)", async () => {
     const arrangement = makeArrangement("A");
 
