@@ -40,6 +40,8 @@ vi.mock("@/lib/auth/session", () => ({
   NoTenantSelectedError: class extends Error {},
 }));
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 const SUFFIX = "dec" + Date.now().toString(36);
 
@@ -60,6 +62,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   const entity = await prisma.legalEntity.findFirst({
@@ -106,11 +109,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("AiExtractionSuggestion decision schema (2026-06-05)", () => {
+describe.skipIf(!HAS_DB)("AiExtractionSuggestion decision schema (2026-06-05)", () => {
   it("acceptedBy + acceptedAt columns exist + start null on the model output row", async () => {
     const fresh = await prisma.aiExtractionSuggestion.findUniqueOrThrow({
       where: { id: suggestionId },
