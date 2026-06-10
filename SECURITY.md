@@ -8,7 +8,7 @@ If you have found a security issue in this repository, please report it
 - Email: `security@ledger-nexus.com` (replace with real address when
   the domain is provisioned)
 - GitHub: open a private security advisory at
-  https://github.com/ledger-nexus/REPO/security/advisories/new
+  https://github.com/ledger-nexus/revenue-rec/security/advisories/new
 
 Please **do not** open a public GitHub issue for security problems.
 
@@ -42,7 +42,29 @@ of acknowledgement on request.
 
 ## SOC 2 framework
 
-This project is being prepared for SOC 2 Type 1 audit readiness. See
-`docs/SOC2_READINESS.md` for the current assessment and remediation
-status.
+This project is part of the `ledger-nexus` portfolio approaching SOC 2
+Type 1 audit readiness. The authoritative framework lives in
+`ledger-core/docs/`:
+
+- `ledger-core/docs/SOC2_READINESS.md` — current assessment
+- `ledger-core/docs/SOC2_CONTROL_MATRIX.md` — CC1–CC9 + 4 TSCs evidence map
+- `ledger-core/docs/policies/` — 10-document policy framework
+- `ledger-core/docs/architecture/portfolio-data-locations.md` —
+  portfolio-wide data location map
+
+This repo's specific scope:
+
+- `docs/policies/data-subject-requests.md` — DSR procedure scoped to
+  the contracts + recognition data this repo holds
+- `src/lib/privacy/rr-attribution.ts` — typed stub for the cross-repo
+  attribution helper. **ContractDocument.rawText is the highest-
+  sensitivity column in the portfolio** (counterparty PII, signatories);
+  the stub's interface design enforces a count-only / never-contents
+  contract.
+
+## Incident handling
+
+Reports meeting the SEV-1/SEV-2 bar (contract-document exfiltration,
+counterparty PII exposure, unauthorized recognition post) follow the
+portfolio procedure in `ledger-core/docs/policies/incident-response.md`.
 
