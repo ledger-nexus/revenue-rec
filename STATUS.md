@@ -26,7 +26,11 @@ Update your own heartbeat every ~20 turns. If your heartbeat is older
 than 60 minutes, other sessions may consider your claim stale.
 -->
 
-_No active claims._
+### Session mirror-resync-rr · started 2026-07-16 · heartbeat 2026-07-16
+- **Scope**: re-sync stale ledger-core schema mirror to main@9442667; ban `db push` (reviewed-diff protocol); docs
+- **Files / globs**: `prisma/schema.prisma`, `package.json`, `CLAUDE.md`, `docs/ARCHITECTURE.md`, `README.md`, `STATUS.md`
+- **Branch**: `claude/mirror-resync`
+- **Working dir**: `/Users/hosungson/Code/revenue-rec/.claude/worktrees/mirror-resync-rr`
 
 ---
 
