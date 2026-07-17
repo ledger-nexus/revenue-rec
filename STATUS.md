@@ -32,6 +32,11 @@ _No active claims._
 
 ## Recent completions
 
+### Session po-fold · 2026-07-16
+- **Scope**: fold the PerformanceObligation deviation annotation into the plain mirror (columns/enums upstreamed via ledger-core PR #262)
+- **Branch**: claude/po-deviation-fold (stacked on claude/mirror-resync, worktree .claude/worktrees/po-fold)
+- **Outcome**: comment-only; db:diff byte-identical pre/post fold; merge AFTER ledger-core #262
+
 <!--
 When a session finishes work, move its block here with a final timestamp.
 Keep the last ~10 entries; trim older ones to keep this file under 200 lines.

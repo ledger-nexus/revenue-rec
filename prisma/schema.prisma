@@ -10,8 +10,10 @@
 //      definitions in ledger-core's schema — column-for-column, relations
 //      trimmed to the mirrored set. revenue-rec does NOT migrate these
 //      tables; ledger-core owns them. This mirror was GENERATED from
-//      ledger-core's schema at main commit 9442667 (2026-07-16) —
-//      re-generate on upstream schema change, never hand-drift.
+//      ledger-core's schema at main commit 9442667 (2026-07-16), plus the
+//      PerformanceObligation allocation columns/enums upstreamed by
+//      ledger-core PR #262 — re-generate on upstream schema change, never
+//      hand-drift.
 //
 //      The mirror is FK-CLOSED: every foreign key on a mirrored table points
 //      at another mirrored table, so `npm run db:diff` produces ZERO
@@ -19,16 +21,12 @@
 //      statement against one of them, the mirror has drifted — re-generate it
 //      from ledger-core before doing anything else.
 //
-//      ONE documented deviation from upstream: `PerformanceObligation`
-//      carries four revenue-rec-added columns (`allocatedAmount`,
-//      `allocationMethod`, `fairValueMethod`, `quantity`) plus the two
-//      enums they use (`AllocationMethod`, `FairValueMethod`). These were
-//      added by revenue-rec PR #17 (ASC 606 ¶77 + ¶78) and EXIST in the
-//      shared database, but have not yet been upstreamed into ledger-core's
-//      schema. They must stay declared here until ledger-core adopts them —
-//      removing them would make db:diff emit DROP COLUMN against a
-//      ledger-core-owned table. TODO: upstream to ledger-core, then fold
-//      into the plain mirror on the next re-generation.
+//      (History: `allocatedAmount`, `allocationMethod`, `fairValueMethod`,
+//      `quantity` + the AllocationMethod / FairValueMethod enums were born
+//      here as a documented deviation — revenue-rec PR #17, ASC 606
+//      ¶77 + ¶78 — and upstreamed to ledger-core via its PR #262 and
+//      migration 0017. They are now plain mirrored columns; ledger-core
+//      owns them like the rest of performance_obligation.)
 //
 //   2. revenue-rec models this repo OWNS (ContractDocument,
 //      AiExtractionSuggestion, RecognitionSchedule, RecognitionEvent).
@@ -42,11 +40,11 @@
 //        1. npm run db:diff                    # migrate diff → SQL script
 //        2. Review: keep ONLY statements touching revenue-rec-owned tables
 //           (contract_document, ai_extraction_suggestion,
-//           recognition_schedule, recognition_event), revenue-rec-owned
-//           enums (AllocationMethod, FairValueMethod), and — only when
-//           deliberately extending the documented PerformanceObligation
-//           deviation — performance_obligation column additions. Everything
-//           else is subset-of-shared-DB noise and MUST NOT run.
+//           recognition_schedule, recognition_event). Everything else —
+//           including anything touching performance_obligation or the
+//           AllocationMethod / FairValueMethod enums, which are
+//           ledger-core-owned since its PR #262 — is subset-of-shared-DB
+//           noise and MUST NOT run.
 //        3. npx prisma db execute --file <reviewed.sql>
 //
 // The repos share one Postgres database — revenue-rec connects with the
@@ -688,30 +686,27 @@ model PerformanceObligation {
   revenueAccountCode  String // e.g. "4000"
   deferredAccountCode String // e.g. "2200"
 
-  // -----------------------------------------------------------------------
-  // revenue-rec-ADDED columns (PR #17, ASC 606 ¶77 + ¶78) — the documented
-  // deviation from ledger-core main@9442667 (see header). These columns
-  // exist in the shared database but not yet in ledger-core's schema.
-  // Do NOT remove until upstreamed.
-  // -----------------------------------------------------------------------
+  // ASC 606 allocation columns, upstreamed from revenue-rec (its PR #17,
+  // applied to the shared DB 2026). revenue-rec's allocator/scheduler and
+  // NS mappers read + write these; ledger-core owns the definitions.
 
-  /// Allocated transaction price for this PO. When null, the allocator
-  /// falls back to SSP (proportional allocation default). When set, this
-  /// is the authoritative amount the recognition engine schedules.
+  // Allocated transaction price for this PO. When null, revenue-rec's
+  // allocator falls back to SSP (proportional allocation default). When
+  // set, this is the authoritative amount the recognition engine schedules.
   allocatedAmount Decimal? @db.Decimal(18, 4)
 
-  /// How the transaction price got allocated to this PO (ASC 606 ¶78).
-  /// Null = unspecified (pre-migration data + AI-extracted contracts that
-  /// didn't surface the method).
+  // How the transaction price got allocated to this PO (ASC 606 ¶78).
+  // Null = unspecified (pre-migration data + AI-extracted contracts that
+  // didn't surface the method).
   allocationMethod AllocationMethod?
 
-  /// Fair-value evidence type (ASC 606 ¶77, formerly ASC 605 VSOE
-  /// hierarchy). Tracked for audit-trail purposes; does not affect
-  /// recognition math. Null = unspecified.
+  // Fair-value evidence type (ASC 606 ¶77, formerly ASC 605 VSOE
+  // hierarchy). Tracked for audit-trail purposes; does not affect
+  // recognition math. Null = unspecified.
   fairValueMethod FairValueMethod?
 
-  /// Item quantity. Defaults to 1 (the dominant case: SSP carries the
-  /// per-line total, not per-unit).
+  // Item quantity. Defaults to 1 (the dominant case: SSP carries the
+  // per-line total, not per-unit).
   quantity Decimal @default(1) @db.Decimal(18, 4)
 
   // Backrefs to revenue-rec's own tables.
@@ -720,6 +715,26 @@ model PerformanceObligation {
 
   @@unique([contractId, sequenceNo])
   @@map("performance_obligation")
+}
+
+// ASC 606 ¶78 allocation methods. PROPORTIONAL is the default
+// (relative-SSP); RESIDUAL is permitted when SSP for one or more
+// POs is uncertain; MANUAL captures auditor-required overrides.
+enum AllocationMethod {
+  PROPORTIONAL
+  RESIDUAL
+  MANUAL
+}
+
+// ASC 606 ¶77 fair-value evidence hierarchy (carried over from
+// the ASC 605 VSOE/TPE/ESP framework for continuity in audit
+// trails). RESIDUAL means SSP was determined by the residual
+// approach (total minus observable SSPs of other POs).
+enum FairValueMethod {
+  ESP
+  VSOE
+  TPE
+  RESIDUAL
 }
 
 model RevenueContractBookAttributes {
@@ -734,31 +749,6 @@ model RevenueContractBookAttributes {
 
   @@id([contractId, bookId])
   @@map("revenue_contract_book_attributes")
-}
-
-// =========================================================================
-// revenue-rec-owned enums — managed by THIS repo (used only by the
-// revenue-rec-added PerformanceObligation columns above)
-// =========================================================================
-
-/// ASC 606 ¶78 allocation methods. PROPORTIONAL is the default
-/// (relative-SSP); RESIDUAL is permitted when SSP for one or more
-/// POs is uncertain; MANUAL captures auditor-required overrides.
-enum AllocationMethod {
-  PROPORTIONAL
-  RESIDUAL
-  MANUAL
-}
-
-/// ASC 606 ¶77 fair-value evidence hierarchy (carried over from
-/// the ASC 605 VSOE/TPE/ESP framework for continuity in audit
-/// trails). RESIDUAL means SSP was determined by the residual
-/// approach (total minus observable SSPs of other POs).
-enum FairValueMethod {
-  ESP
-  VSOE
-  TPE
-  RESIDUAL
 }
 
 // =========================================================================
