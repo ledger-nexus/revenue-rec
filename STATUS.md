@@ -32,6 +32,10 @@ _No active claims._
 
 ## Recent completions
 
+### Session po-fold · 2026-07-16
+- **Scope**: fold the PerformanceObligation deviation annotation into the plain mirror (columns/enums upstreamed via ledger-core PR #262)
+- **Outcome**: landed via #39; comment-only, db:diff byte-identical pre/post fold. This session's own PR (#38) was closed as a duplicate — a concurrent session built the same fix and merged first. #38's sharper protocol wording (naming the enums as ledger-core-owned) is ported here.
+
 <!--
 When a session finishes work, move its block here with a final timestamp.
 Keep the last ~10 entries; trim older ones to keep this file under 200 lines.
