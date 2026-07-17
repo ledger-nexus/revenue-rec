@@ -19,16 +19,15 @@
 //      statement against one of them, the mirror has drifted — re-generate it
 //      from ledger-core before doing anything else.
 //
-//      ONE documented deviation from upstream: `PerformanceObligation`
-//      carries four revenue-rec-added columns (`allocatedAmount`,
-//      `allocationMethod`, `fairValueMethod`, `quantity`) plus the two
-//      enums they use (`AllocationMethod`, `FairValueMethod`). These were
-//      added by revenue-rec PR #17 (ASC 606 ¶77 + ¶78) and EXIST in the
-//      shared database, but have not yet been upstreamed into ledger-core's
-//      schema. They must stay declared here until ledger-core adopts them —
-//      removing them would make db:diff emit DROP COLUMN against a
-//      ledger-core-owned table. TODO: upstream to ledger-core, then fold
-//      into the plain mirror on the next re-generation.
+//      HISTORY (no longer a deviation): `PerformanceObligation`'s four
+//      allocation columns (`allocatedAmount`, `allocationMethod`,
+//      `fairValueMethod`, `quantity`) and their two enums
+//      (`AllocationMethod`, `FairValueMethod`) were added by revenue-rec
+//      PR #17 (ASC 606 ¶77 + ¶78) via raw SQL and sat undeclared in
+//      ledger-core's schema. They were upstreamed in
+//      ledger-nexus/ledger-core#262 (2026-07-16), so ledger-core is canon
+//      for them again and they are ordinary mirrored columns here.
+//      `performance_obligation` remains a LEDGER-CORE-OWNED table.
 //
 //   2. revenue-rec models this repo OWNS (ContractDocument,
 //      AiExtractionSuggestion, RecognitionSchedule, RecognitionEvent).
@@ -43,10 +42,13 @@
 //        2. Review: keep ONLY statements touching revenue-rec-owned tables
 //           (contract_document, ai_extraction_suggestion,
 //           recognition_schedule, recognition_event), revenue-rec-owned
-//           enums (AllocationMethod, FairValueMethod), and — only when
-//           deliberately extending the documented PerformanceObligation
-//           deviation — performance_obligation column additions. Everything
-//           else is subset-of-shared-DB noise and MUST NOT run.
+//           enums (AllocationMethod, FairValueMethod). Everything else —
+//           including any statement against performance_obligation or any
+//           other ledger-core-owned table — is subset-of-shared-DB noise and
+//           MUST NOT run. (The old carve-out permitting
+//           performance_obligation column additions from this repo is gone:
+//           those columns are upstreamed, and new ones go to ledger-core
+//           first. See ledger-core#262.)
 //        3. npx prisma db execute --file <reviewed.sql>
 //
 // The repos share one Postgres database — revenue-rec connects with the
@@ -689,10 +691,10 @@ model PerformanceObligation {
   deferredAccountCode String // e.g. "2200"
 
   // -----------------------------------------------------------------------
-  // revenue-rec-ADDED columns (PR #17, ASC 606 ¶77 + ¶78) — the documented
-  // deviation from ledger-core main@9442667 (see header). These columns
-  // exist in the shared database but not yet in ledger-core's schema.
-  // Do NOT remove until upstreamed.
+  // ASC 606 ¶77 + ¶78 allocation columns. Originally added by revenue-rec
+  // (PR #17) via raw SQL; upstreamed into ledger-core's schema in
+  // ledger-core#262, so these are ordinary mirrored columns now — mirror
+  // them from ledger-core, never hand-edit.
   // -----------------------------------------------------------------------
 
   /// Allocated transaction price for this PO. When null, the allocator
