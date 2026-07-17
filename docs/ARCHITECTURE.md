@@ -64,6 +64,16 @@ Same rationale as recon. The mirror is column-for-column with ledger-core. The t
 
 The mirror is a contract: when ledger-core's schema changes upstream, this copy must be re-synced. The CLAUDE.md non-negotiable #2 names this explicitly.
 
+## Schema-safety protocol (re-synced 2026-07-16)
+
+The mirror went stale once (it lagged ledger-core by several sprints of columns — `tenantId` denormalization, ownership/audit columns, `totalDebit`/`totalCredit`, and more), and the old schema header claimed `prisma db push` from this repo "creates our tables on top of ledger-core's". That claim was wrong: because this schema declares only a **subset** of the shared database, `db push` executes the FULL diff — with a stale mirror, that diff contains destructive ALTERs against ledger-core-owned tables (xbrl-filer measured 284 statements, 263 destructive, from the same pattern). Therefore:
+
+- **`db push` and `migrate dev` are banned in this repo** — the npm scripts were removed. Never reintroduce them.
+- The mirror is **generated from ledger-core's schema** (currently main commit `9442667`, 2026-07-16), column-for-column, relations trimmed to the mirrored set — never hand-edited.
+- The mirror is **FK-closed**: every foreign key on a mirrored table points at another mirrored table (which is why Currency, Period, FiscalCalendar, Item, DimensionSet, Tenant, etc. are mirrored). ledger-core's raw-SQL indexes on mirrored tables (4× `extensions` GIN + `gl_entry_header_total_debit_idx`) are declared too. Result: `npm run db:diff` produces **zero statements** naming any ledger-core-owned or revenue-rec-owned table. A non-zero result = mirror drift; re-generate before doing anything else.
+- Schema changes to revenue-rec-owned tables apply via the **reviewed-diff protocol**: `npm run db:diff` → review the script, keep ONLY statements touching revenue-rec-owned tables/enums (`contract_document`, `ai_extraction_suggestion`, `recognition_schedule`, `recognition_event`, `AllocationMethod`, `FairValueMethod`) → `npx prisma db execute --file <reviewed.sql>`. Everything else in the diff is subset-of-shared-DB noise (drops of other repos' objects) and MUST NOT run.
+- **Documented deviation**: `performance_obligation` carries four revenue-rec-added columns (`allocatedAmount`, `allocationMethod`, `fairValueMethod`, `quantity`; PR #17) that exist in the shared DB but are not yet in ledger-core's schema. They stay declared in the mirror until upstreamed — see the schema header.
+
 ## Why deterministic-first
 
 The ASC 606 math is the part you cannot get wrong. Allocation, schedule, journal mechanics — these have correct answers and the auditor will check them. The interpretation work (is the implementation distinct from the subscription? what's the customer's SSP?) is judgment, and that's where AI helps a human accountant move faster.

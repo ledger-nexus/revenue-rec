@@ -51,7 +51,15 @@ pnpm install
 cp .env.example .env
 # Point DATABASE_URL at the same Postgres ledger-core uses
 
-pnpm db:push      # adds contract_document, recognition_schedule, etc. on top of ledger-core's tables
+# NOTE: `db push` is banned in this repo (the schema declares a subset of the
+# shared DB; a blind push emits destructive ALTERs against ledger-core-owned
+# tables). Owned tables (contract_document, recognition_schedule, ...) are
+# created via the reviewed-diff protocol instead:
+pnpm db:diff > pending.sql   # migrate diff → SQL script (read-only)
+# review pending.sql: keep ONLY statements touching revenue-rec-owned tables,
+# then: npx prisma db execute --file pending.sql
+# (see docs/ARCHITECTURE.md "Schema-safety protocol")
+
 pnpm db:seed      # creates the sample Initech contract + recognition schedule
 pnpm dev          # http://localhost:3002 — note: different ports than ledger-core (3000) and recon (3001)
 pnpm test         # SSP allocator + recognition schedule tests
