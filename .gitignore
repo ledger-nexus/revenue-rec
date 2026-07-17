@@ -11,3 +11,4 @@ coverage
 *.tsbuildinfo
 .prisma/
 prisma/generated/
+.claude/worktrees/
