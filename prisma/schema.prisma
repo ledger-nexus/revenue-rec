@@ -2,21 +2,55 @@
 //
 // Two halves:
 //
-//   1. ledger-core models revenue-rec QUERIES (LegalEntity, Book, Party,
-//      JournalEntry, JournalLine, RevenueContract, PerformanceObligation,
+//   1. ledger-core models revenue-rec QUERIES (Tenant, TenantMembership,
+//      User, LegalEntity, Book, Account, Party, JournalEntry, JournalLine,
+//      Currency, Period, FiscalCalendar, Item, DimensionSet,
+//      RevenueContract, PerformanceObligation,
 //      RevenueContractBookAttributes). These mirror the canonical
-//      definitions in ledger-core's schema — column-for-column.
-//      revenue-rec does NOT migrate these tables; ledger-core owns the
-//      schema. If ledger-core's schema changes upstream, this copy MUST
-//      be re-synced.
+//      definitions in ledger-core's schema — column-for-column, relations
+//      trimmed to the mirrored set. revenue-rec does NOT migrate these
+//      tables; ledger-core owns them. This mirror was GENERATED from
+//      ledger-core's schema at main commit 9442667 (2026-07-16) —
+//      re-generate on upstream schema change, never hand-drift.
 //
-//   2. revenue-rec-specific models OWNED by this repo (ContractDocument,
+//      The mirror is FK-CLOSED: every foreign key on a mirrored table points
+//      at another mirrored table, so `npm run db:diff` produces ZERO
+//      statements against ledger-core-owned tables. If the diff ever shows a
+//      statement against one of them, the mirror has drifted — re-generate it
+//      from ledger-core before doing anything else.
+//
+//      ONE documented deviation from upstream: `PerformanceObligation`
+//      carries four revenue-rec-added columns (`allocatedAmount`,
+//      `allocationMethod`, `fairValueMethod`, `quantity`) plus the two
+//      enums they use (`AllocationMethod`, `FairValueMethod`). These were
+//      added by revenue-rec PR #17 (ASC 606 ¶77 + ¶78) and EXIST in the
+//      shared database, but have not yet been upstreamed into ledger-core's
+//      schema. They must stay declared here until ledger-core adopts them —
+//      removing them would make db:diff emit DROP COLUMN against a
+//      ledger-core-owned table. TODO: upstream to ledger-core, then fold
+//      into the plain mirror on the next re-generation.
+//
+//   2. revenue-rec models this repo OWNS (ContractDocument,
 //      AiExtractionSuggestion, RecognitionSchedule, RecognitionEvent).
-//      These live only here; `prisma db push` from this repo creates them
-//      on top of ledger-core's tables.
+//      Schema changes to the shared DB are applied via a REVIEWED
+//      `prisma migrate diff` script — NEVER `prisma db push` or
+//      `migrate dev`. Because this schema declares only a subset of the
+//      shared database, a blind push would execute the full diff, including
+//      DROP/ALTER statements against every shared table this file doesn't
+//      declare (or declares incorrectly). Protocol:
 //
-// Shared Postgres: revenue-rec connects with the same DATABASE_URL as
-// ledger-core. Same arrangement as recon.
+//        1. npm run db:diff                    # migrate diff → SQL script
+//        2. Review: keep ONLY statements touching revenue-rec-owned tables
+//           (contract_document, ai_extraction_suggestion,
+//           recognition_schedule, recognition_event), revenue-rec-owned
+//           enums (AllocationMethod, FairValueMethod), and — only when
+//           deliberately extending the documented PerformanceObligation
+//           deviation — performance_obligation column additions. Everything
+//           else is subset-of-shared-DB noise and MUST NOT run.
+//        3. npx prisma db execute --file <reviewed.sql>
+//
+// The repos share one Postgres database — revenue-rec connects with the
+// same DATABASE_URL as ledger-core. Same arrangement as recon.
 
 generator client {
   provider = "prisma-client-js"
@@ -28,45 +62,229 @@ datasource db {
 }
 
 // =========================================================================
-// ledger-core mirror — DO NOT EDIT without syncing upstream
+// ledger-core mirror — DO NOT EDIT without re-syncing from ledger-core
 // =========================================================================
 
-model LegalEntity {
-  id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // SECURITY (pen-test pass 4): tenantId added so Server Actions can
-  // tenant-scope their record lookups. Column exists in the shared DB.
-  tenantId             String  @db.Uuid
-  code                 String
-  name                 String
-  parentEntityId       String? @db.Uuid
-  functionalCurrencyId String
-  sourceSystem         String?
-  sourceRecordType     String?
-  sourceRecordId       String?
-  sourcePayload        Json?
-  mappingVersion       String?
-  extensions           Json?
+enum TenantRole {
+  OWNER // cannot be removed; can delete the tenant
+  ADMIN // full read+write+admin (period close, user lifecycle)
+  MEMBER // read+write, no admin actions
+}
 
+enum BookBasis {
+  US_GAAP
+  US_TAX
+  IFRS
+  MGMT
+  STATUTORY
+}
+
+enum PeriodFrequency {
+  MONTHLY
+  QUARTERLY
+  WEEKLY_4_4_5
+  WEEKLY_4_5_4
+  WEEKLY_5_4_4
+  CUSTOM
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum TranslationCategory {
+  CURRENT_RATE
+  HISTORICAL
+  WEIGHTED_AVG
+  EXCLUDED
+}
+
+enum JournalSource {
+  MANUAL // entered by a human via the UI
+  SEED // loaded from seed data
+  SYSTEM // posted by another module (e.g. rev rec engine)
+  AI_APPROVED // AI suggested, human approved
+  IMPORT // ERP import (companion to source_system lineage)
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  VOID
+  REVERSED
+}
+
+enum OwnerType {
+  USER
+  QUEUE
+}
+
+enum ItemType {
+  INVENTORY
+  NON_INVENTORY
+  SERVICE
+  KIT
+  ASSEMBLY
+  FIXED_ASSET
+}
+
+enum CostingMethod {
+  FIFO
+  LIFO
+  AVERAGE
+  STANDARD
+  SPECIFIC
+}
+
+enum RevenueContractStatus {
+  DRAFT
+  ACTIVE
+  AMENDED
+  TERMINATED
+  COMPLETED
+}
+
+enum RecognitionPattern {
+  POINT_IN_TIME
+  OVER_TIME_STRAIGHT
+  OVER_TIME_USAGE
+  OVER_TIME_MILESTONE
+}
+
+enum RecognitionBasis {
+  ACCRUAL
+  CASH
+}
+
+model Tenant {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String @unique // url-safe, e.g. "acme-co"
+  name        String
+  ownerUserId String @db.Uuid
+
+  memberships TenantMembership[]
+
+  // Backrefs from tenant-scoped domain models (mirrored subset only).
+  legalEntities    LegalEntity[]
+  fiscalCalendars  FiscalCalendar[]
+  periods          Period[]
+  parties          Party[]
+  items            Item[]
+  accounts         Account[]
   journalEntries   JournalEntry[]
+  journalLines     JournalLine[]
+  dimensionSets    DimensionSet[]
+  revenueContracts RevenueContract[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete
+
+  @@index([ownerUserId])
+  @@map("tenant")
+}
+
+model TenantMembership {
+  id       String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  role     TenantRole @default(MEMBER)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("tenant_membership")
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique
+  displayName   String
+  isActive      Boolean   @default(true)
+  deactivatedAt DateTime?
+
+  // Multi-tenancy: a User can belong to N Tenants via TenantMembership.
+  // User itself is global (no tenantId) — login lookup is global by email.
+  tenantMemberships TenantMembership[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("app_user")
+}
+
+model LegalEntity {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String        @db.Uuid
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  // Phase 4b: code is unique PER tenant. Two tenants can both own
+  // an entity coded "ACME" — collisions are isolated by tenantId.
+  code           String
+  name           String
+  parentEntityId String?       @db.Uuid
+  parent         LegalEntity?  @relation("EntityHierarchy", fields: [parentEntityId], references: [id])
+  children       LegalEntity[] @relation("EntityHierarchy")
+
+  // The currency this entity reports in. Each book may override for reporting.
+  functionalCurrencyId String
+  functionalCurrency   Currency @relation("EntityFunctionalCcy", fields: [functionalCurrencyId], references: [code])
+
+  // NetSuite OneWorld: one subsidiary per group is the "elimination
+  // subsidiary" — its only postings are the intercompany eliminations
+  // the consolidation engine generates.
+  isEliminationEntity Boolean @default(false)
+
+  // Lineage — null for natively-created entities; populated on ERP import.
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  fiscalCalendars  FiscalCalendar[]
+  accounts         Account[]
+  journalEntries   JournalEntry[]
+  parties          Party[]
+  items            Item[]
   revenueContracts RevenueContract[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([tenantId, code])
+  @@index([tenantId])
   @@map("legal_entity")
 }
 
 model Book {
-  id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code                String  @unique
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String    @unique // e.g. "US_GAAP", "US_TAX", "IFRS", "MGMT"
   name                String
+  // The accounting basis. Drives default behavior in posting rules + reports.
   basis               BookBasis
+  // Reporting currency for THIS book. Functional currency lives on LegalEntity.
   reportingCurrencyId String
-  isActive            Boolean @default(true)
-  extensions          Json?
+  reportingCurrency   Currency  @relation("BookReportingCcy", fields: [reportingCurrencyId], references: [code])
 
-  journalEntries   JournalEntry[]
-  contractBookAttrs RevenueContractBookAttributes[]
+  isActive   Boolean @default(true)
+  extensions Json?
+
+  journalEntries                JournalEntry[]
+  revenueContractBookAttributes RevenueContractBookAttributes[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -74,19 +292,78 @@ model Book {
   @@map("book")
 }
 
-model Party {
-  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // SECURITY: tenantId added so Server Actions can tenant-scope
-  // party lookups + creates. Column exists in shared DB; this mirror
-  // now surfaces it. Closes part of v2.1 deficiency-log #26.
-  tenantId      String  @db.Uuid
-  entityId      String? @db.Uuid
-  code          String
-  displayName   String
-  parentPartyId String? @db.Uuid
+model FiscalCalendar {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId        String          @db.Uuid
+  entity          LegalEntity     @relation(fields: [entityId], references: [id])
+  code            String // e.g. "STANDARD_2026"
+  name            String
+  periodFrequency PeriodFrequency @default(MONTHLY)
 
-  journalLines     JournalLine[]
-  revenueContracts RevenueContract[] @relation("ContractCustomer")
+  periods Period[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([entityId, code])
+  @@index([tenantId])
+  @@map("fiscal_calendar")
+}
+
+model Period {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String         @db.Uuid
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  calendarId String         @db.Uuid
+  calendar   FiscalCalendar @relation(fields: [calendarId], references: [id])
+  code       String // e.g. "2026-01", "2026-Q1"
+  ordinal    Int // 1..12 for monthly, 1..52 for weekly
+  startsOn   DateTime       @db.Date
+  endsOn     DateTime       @db.Date
+
+  journalEntries JournalEntry[]
+
+  @@unique([calendarId, code])
+  @@unique([calendarId, ordinal])
+  @@index([startsOn, endsOn])
+  @@index([tenantId])
+  @@map("period")
+}
+
+model Currency {
+  // ISO 4217 code is the primary key — these are stable.
+  code     String  @id // "USD", "EUR", "JPY"
+  name     String
+  decimals Int     @default(2) // 2 for USD, 0 for JPY, etc.
+  symbol   String?
+
+  entitiesFunctional LegalEntity[]     @relation("EntityFunctionalCcy")
+  booksReporting     Book[]            @relation("BookReportingCcy")
+  journalEntries     JournalEntry[]    @relation("JeCurrency")
+  linesTxn           JournalLine[]     @relation("LineTxnCcy")
+  linesReporting     JournalLine[]     @relation("LineReportingCcy")
+  revenueContracts   RevenueContract[] @relation("RevContractCcy")
+
+  @@map("currency")
+}
+
+model Party {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId    String?      @db.Uuid // null = shared across entities
+  entity      LegalEntity? @relation(fields: [entityId], references: [id])
+  code        String // human-readable, often source-system code
+  displayName String
+
+  // Customer:Job / Project / WBS / Sage Job all collapse to one Party with parent.
+  parentPartyId String? @db.Uuid
+  parent        Party?  @relation("PartyHierarchy", fields: [parentPartyId], references: [id])
+  children      Party[] @relation("PartyHierarchy")
+
+  journalLines      JournalLine[]
+  customerContracts RevenueContract[] @relation("ContractCustomer")
 
   sourceSystem     String?
   sourceRecordType String?
@@ -99,27 +376,28 @@ model Party {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "party_extensions_gin", type: Gin)
   @@map("party")
 }
 
-model JournalEntry {
-  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
-  // No tenantId in this mirror; drop @unique, callers use findFirst.
-  entryNumber  String
-  entityId     String      @db.Uuid
-  entity       LegalEntity @relation(fields: [entityId], references: [id])
-  bookId       String      @db.Uuid
-  book         Book        @relation(fields: [bookId], references: [id])
-  periodId     String?     @db.Uuid
-  documentDate DateTime    @db.Date
-  postingDate  DateTime    @db.Date
-  memo         String
-  currencyId   String
-  fxRate       Decimal     @default(1) @db.Decimal(20, 10)
-  source       JournalSource @default(MANUAL)
-  status       EntryStatus   @default(POSTED)
-  reversalOfId String?     @db.Uuid
+model Item {
+  id                          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                    String         @db.Uuid
+  tenant                      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId                    String?        @db.Uuid
+  entity                      LegalEntity?   @relation(fields: [entityId], references: [id])
+  code                        String
+  name                        String
+  itemType                    ItemType       @default(SERVICE)
+  costingMethod               CostingMethod?
+  defaultIncomeAccountCode    String?
+  defaultExpenseAccountCode   String?
+  defaultInventoryAccountCode String?
+
+  journalLines JournalLine[]
 
   sourceSystem     String?
   sourceRecordType String?
@@ -128,60 +406,238 @@ model JournalEntry {
   mappingVersion   String?
   extensions       Json?
 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([tenantId])
+  @@map("item")
+}
+
+model Account {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entityId null = shared across all entities (consolidated chart).
+  entityId String?      @db.Uuid
+  entity   LegalEntity? @relation(fields: [entityId], references: [id])
+
+  // Human-readable code (e.g. "1000" for Cash). NOT a source-system primary key.
+  code             String
+  name             String
+  type             AccountType
+  normalBalance    NormalBalance
+  subtype          String? // e.g. "CASH", "AR_TRADE", "INVENTORY_RAW"
+  isContra         Boolean       @default(false)
+  isControlAccount Boolean       @default(false) // true for AR/AP control accounts
+  isBank           Boolean       @default(false)
+
+  // ASC 830 / IAS 21: monetary accounts are re-measured at period-end CLOSE
+  // rate; non-monetary accounts stay at historical rate.
+  isMonetary Boolean @default(false)
+
+  // FX Phase 4 — ASC 830 translation method for CONSOLIDATION. Nullable so
+  // existing single-currency installations don't need a backfill.
+  translationCategory TranslationCategory?
+
+  parentAccountId String?   @db.Uuid
+  parent          Account?  @relation("AccountHierarchy", fields: [parentAccountId], references: [id])
+  children        Account[] @relation("AccountHierarchy")
+
+  // Books this account applies to. Empty = applies to all books.
+  bookScope String[] @default([])
+
+  active Boolean @default(true)
+
+  // BlackLine arc Phase 1: per-account override of the tenant default.
+  requiresReconReview Boolean?
+  reconTolerance      Decimal? @db.Decimal(20, 4)
+
   lines JournalLine[]
 
-  // Backref to revenue-rec's recognition events.
-  recognitionEvents RecognitionEvent[]
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([type])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "account_extensions_gin", type: Gin)
+  @@map("account")
+}
+
+model JournalEntry {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entryNumber is a human-readable sequential ID.
+  // Phase 4b: unique per [tenantId, entryNumber].
+  entryNumber String
+
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+  bookId   String      @db.Uuid
+  book     Book        @relation(fields: [bookId], references: [id])
+
+  // periodId is resolved at posting time from the document/posting date and
+  // the entity's fiscal calendar.
+  periodId String? @db.Uuid
+  period   Period? @relation(fields: [periodId], references: [id])
+
+  documentDate DateTime @db.Date
+  postingDate  DateTime @db.Date
+
+  memo String
+
+  currencyId String
+  currency   Currency @relation("JeCurrency", fields: [currencyId], references: [code])
+  fxRate     Decimal  @default(1) @db.Decimal(20, 10)
+
+  source JournalSource @default(MANUAL)
+  status EntryStatus   @default(POSTED)
+
+  reversalOfId String?        @db.Uuid
+  reversalOf   JournalEntry?  @relation("Reversal", fields: [reversalOfId], references: [id])
+  reversedBy   JournalEntry[] @relation("Reversal")
+
+  // Lineage — non-negotiable per spec. Populated on every ERP import.
+  sourceSystem     String? // "QBO", "NETSUITE", "INTACCT", ...
+  sourceRecordType String? // "Invoice", "Bill", "JournalEntry", ...
+  sourceRecordId   String? // the source system's ID (NEVER reused as our PK)
+  sourcePayload    Json? // frozen raw original
+  mappingVersion   String?
+  extensions       Json?
+
+  // Denormalized line sums. Per the invariant that debits == credits,
+  // these are equal on every well-formed entry (postJournalEntry
+  // enforces this). Populated by ledger-core on every new entry.
+  totalDebit  Decimal @default(0) @db.Decimal(18, 4)
+  totalCredit Decimal @default(0) @db.Decimal(18, 4)
+
+  lines JournalLine[]
+
+  // Ownership + audit. ownerId is the default-responsible-party (see
+  // ledger-core docs/ownership-and-rules.md). Polymorphic (User OR Queue,
+  // discriminated by ownerType) — no FK relation by design.
+  ownerId              String?   @db.Uuid
+  ownerType            OwnerType @default(USER)
+  updatedBy            String?
+  updatedAt            DateTime  @default(now()) @updatedAt
+  // When set, the reassignment-rules engine SKIPS this record.
+  reassignmentLockedAt DateTime?
 
   createdAt DateTime @default(now())
   createdBy String?
 
+  // Backref to revenue-rec's own tables.
+  recognitionEvents RecognitionEvent[]
+
+  @@unique([tenantId, entryNumber])
+  @@index([ownerId])
   @@index([entityId, bookId, documentDate])
+  @@index([entityId, bookId, periodId])
+  @@index([sourceSystem, sourceRecordType, sourceRecordId])
+  @@index([tenantId, postingDate])
+  // Created by ledger-core's raw SQL (migrations 0001_constraints + 0019);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "gl_entry_header_extensions_gin", type: Gin)
+  @@index([tenantId, totalDebit], map: "gl_entry_header_total_debit_idx")
   @@map("gl_entry_header")
 }
 
 model JournalLine {
   id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // tenantId denormalized from the parent JournalEntry for query speed.
+  // Always equals entry.tenantId; enforced in ledger-core's postJournalEntry.
+  tenantId  String       @db.Uuid
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   entryId   String       @db.Uuid
   entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
-  lineNo    Int
+  lineNo    Int // 1-based, position within entry
   accountId String       @db.Uuid
+  account   Account      @relation(fields: [accountId], references: [id])
 
-  partyId        String? @db.Uuid
-  party          Party?  @relation(fields: [partyId], references: [id])
-  itemId         String? @db.Uuid
-  dimensionSetId String? @db.Uuid
-  taxCodeId      String?
+  // Sub-ledger keys — nullable.
+  partyId String? @db.Uuid
+  party   Party?  @relation(fields: [partyId], references: [id])
+  itemId  String? @db.Uuid
+  item    Item?   @relation(fields: [itemId], references: [id])
 
+  // Layer 3 — dimension engine.
+  dimensionSetId String?       @db.Uuid
+  dimensionSet   DimensionSet? @relation(fields: [dimensionSetId], references: [id])
+
+  // taxCodeId — slot. TaxCode table arrives with the document layer in a
+  // consumer repo.
+  taxCodeId String?
+
+  // The canonical debit/credit pair in the BOOK's reporting currency.
+  // XOR constraint enforced at the DB layer (ledger-core migration SQL).
   debit  Decimal @default(0) @db.Decimal(18, 4)
   credit Decimal @default(0) @db.Decimal(18, 4)
 
-  transactionAmount     Decimal @default(0) @db.Decimal(18, 4)
+  // Transaction-currency view (signed: debit positive, credit negative).
+  transactionAmount     Decimal   @default(0) @db.Decimal(18, 4)
   transactionCurrencyId String?
-  reportingAmount       Decimal @default(0) @db.Decimal(18, 4)
-  reportingCurrencyId   String?
+  transactionCurrency   Currency? @relation("LineTxnCcy", fields: [transactionCurrencyId], references: [code])
+
+  // Reporting-currency view (signed).
+  reportingAmount     Decimal   @default(0) @db.Decimal(18, 4)
+  reportingCurrencyId String?
+  reportingCurrency   Currency? @relation("LineReportingCcy", fields: [reportingCurrencyId], references: [code])
 
   description String?
   extensions  Json?
 
   @@unique([entryId, lineNo])
+  @@index([entryId])
   @@index([accountId])
+  @@index([partyId])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "gl_entry_line_extensions_gin", type: Gin)
   @@map("gl_entry_line")
 }
 
+// A deduplicated combination of dimension values. Mirrored (without the
+// bridge tables) so gl_entry_line.dimensionSetId keeps its FK declared.
+model DimensionSet {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  // Stable hash of sorted (dimensionId, dimensionValueId) pairs.
+  hash     String
+
+  journalLines JournalLine[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, hash])
+  @@index([tenantId])
+  @@map("dimension_set")
+}
+
 model RevenueContract {
-  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // SECURITY: tenantId added so Server Actions can tenant-scope
-  // contract lookups directly + so cross-tenant create attempts can
-  // be caught at the substrate boundary. Column exists in shared DB
-  // (added 2026-05-31 in the multi-tenant rollout); this mirror now
-  // surfaces it so prisma.revenueContract.create + .findFirst can
-  // operate on it from this repo without raw-SQL escape hatches.
-  // Closes part of v2.1 control-deficiency-log entry #26.
-  tenantId           String                @db.Uuid
-  entityId           String                @db.Uuid
-  entity             LegalEntity           @relation(fields: [entityId], references: [id])
-  code               String
+  id       String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String      @db.Uuid
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+
+  code               String // contract number
   description        String
   customerPartyId    String                @db.Uuid
   customer           Party                 @relation("ContractCustomer", fields: [customerPartyId], references: [id])
@@ -189,14 +645,15 @@ model RevenueContract {
   contractEndDate    DateTime?             @db.Date
   totalContractValue Decimal               @db.Decimal(18, 4)
   currencyId         String
+  currency           Currency              @relation("RevContractCcy", fields: [currencyId], references: [code])
   status             RevenueContractStatus @default(ACTIVE)
 
   performanceObligations PerformanceObligation[]
   bookAttributes         RevenueContractBookAttributes[]
 
-  // Backrefs into revenue-rec's owned tables.
-  document            ContractDocument?
-  aiSuggestions       AiExtractionSuggestion[]
+  // Backrefs to revenue-rec's own tables.
+  document             ContractDocument?
+  aiSuggestions        AiExtractionSuggestion[]
   recognitionSchedules RecognitionSchedule[]
   recognitionEvents    RecognitionEvent[]
 
@@ -211,53 +668,53 @@ model RevenueContract {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
   @@map("revenue_contract")
 }
 
 model PerformanceObligation {
-  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId         String          @db.Uuid
-  contract           RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId         String             @db.Uuid
+  contract           RevenueContract    @relation(fields: [contractId], references: [id], onDelete: Cascade)
   sequenceNo         Int
   description        String
-  /// Standalone selling price. The "what would we charge for this PO
-  /// on its own" anchor — the input to allocation, NOT necessarily
-  /// the recognized amount.
-  ssp                Decimal         @db.Decimal(18, 4)
-  /// Allocated transaction price for this PO. When null, the allocator
-  /// falls back to SSP (proportional allocation default — back-compat
-  /// with pre-2026-06-04 callers). When set, this is the authoritative
-  /// amount the recognition engine schedules. Non-null becomes mandatory
-  /// for NetSuite-imported arrangements where the source carries
-  /// `allocated_amount` explicitly (often divergent from SSP due to
-  /// residual / manual allocation methods).
-  allocatedAmount    Decimal?        @db.Decimal(18, 4)
-  /// How the transaction price got allocated to this PO. ASC 606 ¶78
-  /// permits PROPORTIONAL (relative SSP) as the default; RESIDUAL is
-  /// permitted when SSP for one PO is highly variable / uncertain;
-  /// MANUAL captures auditor-required overrides. Null = unspecified
-  /// (pre-migration data + AI-extracted contracts that didn't surface
-  /// the method).
-  allocationMethod   AllocationMethod?
-  /// Fair-value evidence type (ASC 606 ¶77, formerly ASC 605 VSOE
-  /// hierarchy). ESP = Estimated Selling Price; VSOE = Vendor-Specific
-  /// Objective Evidence; TPE = Third-Party Evidence; RESIDUAL =
-  /// residual approach. Tracked for audit-trail purposes; does not
-  /// affect recognition math. Null = unspecified.
-  fairValueMethod    FairValueMethod?
-  /// Item quantity. Defaults to 1 (the dominant case: SSP carries the
-  /// per-line total, not per-unit). Set explicitly when a NetSuite
-  /// import surfaces a per-unit SSP or when the AI extractor reads
-  /// quantity from contract text.
-  quantity           Decimal         @default(1) @db.Decimal(18, 4)
+  ssp                Decimal            @db.Decimal(18, 4) // standalone selling price (allocated)
   recognitionPattern RecognitionPattern
-  startDate          DateTime        @db.Date
-  endDate            DateTime?       @db.Date
-  recognizedToDate   Decimal         @default(0) @db.Decimal(18, 4)
+  startDate          DateTime           @db.Date
+  endDate            DateTime?          @db.Date
+  recognizedToDate   Decimal            @default(0) @db.Decimal(18, 4)
 
-  revenueAccountCode  String
-  deferredAccountCode String
+  // GL accounts the rev-rec engine posts to when recognizing this PO.
+  revenueAccountCode  String // e.g. "4000"
+  deferredAccountCode String // e.g. "2200"
 
+  // -----------------------------------------------------------------------
+  // revenue-rec-ADDED columns (PR #17, ASC 606 ¶77 + ¶78) — the documented
+  // deviation from ledger-core main@9442667 (see header). These columns
+  // exist in the shared database but not yet in ledger-core's schema.
+  // Do NOT remove until upstreamed.
+  // -----------------------------------------------------------------------
+
+  /// Allocated transaction price for this PO. When null, the allocator
+  /// falls back to SSP (proportional allocation default). When set, this
+  /// is the authoritative amount the recognition engine schedules.
+  allocatedAmount Decimal? @db.Decimal(18, 4)
+
+  /// How the transaction price got allocated to this PO (ASC 606 ¶78).
+  /// Null = unspecified (pre-migration data + AI-extracted contracts that
+  /// didn't surface the method).
+  allocationMethod AllocationMethod?
+
+  /// Fair-value evidence type (ASC 606 ¶77, formerly ASC 605 VSOE
+  /// hierarchy). Tracked for audit-trail purposes; does not affect
+  /// recognition math. Null = unspecified.
+  fairValueMethod FairValueMethod?
+
+  /// Item quantity. Defaults to 1 (the dominant case: SSP carries the
+  /// per-line total, not per-unit).
+  quantity Decimal @default(1) @db.Decimal(18, 4)
+
+  // Backrefs to revenue-rec's own tables.
   scheduleEntries RecognitionSchedule[]
   events          RecognitionEvent[]
 
@@ -271,11 +728,37 @@ model RevenueContractBookAttributes {
   bookId     String          @db.Uuid
   book       Book            @relation(fields: [bookId], references: [id])
 
+  // GAAP/IFRS use ACCRUAL (ASC 606). Tax may use CASH for certain entities.
   recognitionBasis     RecognitionBasis @default(ACCRUAL)
-  cumulativeRecognized Decimal @default(0) @db.Decimal(18, 4)
+  cumulativeRecognized Decimal          @default(0) @db.Decimal(18, 4)
 
   @@id([contractId, bookId])
   @@map("revenue_contract_book_attributes")
+}
+
+// =========================================================================
+// revenue-rec-owned enums — managed by THIS repo (used only by the
+// revenue-rec-added PerformanceObligation columns above)
+// =========================================================================
+
+/// ASC 606 ¶78 allocation methods. PROPORTIONAL is the default
+/// (relative-SSP); RESIDUAL is permitted when SSP for one or more
+/// POs is uncertain; MANUAL captures auditor-required overrides.
+enum AllocationMethod {
+  PROPORTIONAL
+  RESIDUAL
+  MANUAL
+}
+
+/// ASC 606 ¶77 fair-value evidence hierarchy (carried over from
+/// the ASC 605 VSOE/TPE/ESP framework for continuity in audit
+/// trails). RESIDUAL means SSP was determined by the residual
+/// approach (total minus observable SSPs of other POs).
+enum FairValueMethod {
+  ESP
+  VSOE
+  TPE
+  RESIDUAL
 }
 
 // =========================================================================
@@ -286,15 +769,15 @@ model RevenueContractBookAttributes {
 // reads from here. We keep the verbatim source so a human can always
 // audit "what did the AI see vs. what did we structure."
 model ContractDocument {
-  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId    String          @unique @db.Uuid
-  contract      RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId String          @unique @db.Uuid
+  contract   RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
-  filename      String?
-  rawText       String
-  format        String          @default("TEXT")  // TEXT | PDF (v0.2)
-  uploadedAt    DateTime        @default(now())
-  uploadedBy    String?
+  filename   String?
+  rawText    String
+  format     String   @default("TEXT") // TEXT | PDF (v0.2)
+  uploadedAt DateTime @default(now())
+  uploadedBy String?
 
   @@map("contract_document")
 }
@@ -302,9 +785,9 @@ model ContractDocument {
 // Every AI extraction run is logged here, even if the human rejects it.
 // Mirrors recon's AiSuggestion table — same audit principle.
 model AiExtractionSuggestion {
-  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId      String          @db.Uuid
-  contract        RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId String          @db.Uuid
+  contract   RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
   // The model's structured extraction: array of {description, ssp,
   // recognitionPattern, startDate, endDate, rationale}.
@@ -335,8 +818,10 @@ model AiExtractionSuggestion {
   createdAt DateTime @default(now())
 
   @@index([contractId])
-  @@index([acceptedBy])
-  @@index([rejectedBy])
+  // map: the applied SQL created these indexes with lowercase names;
+  // declared explicitly so db:diff stays at zero owned-table statements.
+  @@index([acceptedBy], map: "ai_extraction_suggestion_acceptedby_idx")
+  @@index([rejectedBy], map: "ai_extraction_suggestion_rejectedby_idx")
   @@map("ai_extraction_suggestion")
 }
 
@@ -349,20 +834,20 @@ model AiExtractionSuggestion {
 // happens. It's also the audit trail of "what we planned vs. what we
 // actually did."
 model RecognitionSchedule {
-  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId        String                @db.Uuid
-  contract          RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  obligationId      String                @db.Uuid
-  obligation        PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
-  bookCode          String
+  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId   String                @db.Uuid
+  contract     RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId String                @db.Uuid
+  obligation   PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode     String
 
-  periodStart       DateTime              @db.Date
-  periodEnd         DateTime              @db.Date
-  plannedAmount     Decimal               @db.Decimal(18, 4)
-  status            String                @default("PLANNED")  // PLANNED | POSTED | SKIPPED
+  periodStart   DateTime @db.Date
+  periodEnd     DateTime @db.Date
+  plannedAmount Decimal  @db.Decimal(18, 4)
+  status        String   @default("PLANNED") // PLANNED | POSTED | SKIPPED
 
   // Backref: which RecognitionEvent posted this schedule entry (null if PLANNED).
-  postedByEventId   String?               @db.Uuid
+  postedByEventId String? @db.Uuid
 
   createdAt DateTime @default(now())
 
@@ -376,125 +861,25 @@ model RecognitionSchedule {
 // the schema but the posting logic ships in v0.2 alongside the bridge
 // integration.
 model RecognitionEvent {
-  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId      String                @db.Uuid
-  contract        RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  obligationId    String                @db.Uuid
-  obligation      PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
-  bookCode        String
+  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId   String                @db.Uuid
+  contract     RevenueContract       @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  obligationId String                @db.Uuid
+  obligation   PerformanceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+  bookCode     String
 
-  periodStart     DateTime              @db.Date
-  periodEnd       DateTime              @db.Date
-  amount          Decimal               @db.Decimal(18, 4)
+  periodStart DateTime @db.Date
+  periodEnd   DateTime @db.Date
+  amount      Decimal  @db.Decimal(18, 4)
 
   // The JE that ledger-core posted, returned by the HTTP bridge.
-  postedEntryId   String                @db.Uuid
-  postedEntry     JournalEntry          @relation(fields: [postedEntryId], references: [id])
-  entryNumber     String
+  postedEntryId String       @db.Uuid
+  postedEntry   JournalEntry @relation(fields: [postedEntryId], references: [id])
+  entryNumber   String
 
-  postedAt        DateTime              @default(now())
-  postedBy        String?
+  postedAt DateTime @default(now())
+  postedBy String?
 
   @@index([contractId, bookCode, periodStart])
   @@map("recognition_event")
-}
-
-// =========================================================================
-// Enums mirrored from ledger-core. MUST stay in sync.
-// =========================================================================
-
-enum BookBasis {
-  US_GAAP
-  US_TAX
-  IFRS
-  MGMT
-  STATUTORY
-}
-
-enum JournalSource {
-  MANUAL
-  SEED
-  SYSTEM
-  AI_APPROVED
-  IMPORT
-}
-
-enum EntryStatus {
-  DRAFT
-  POSTED
-  VOID
-  REVERSED
-}
-
-enum RevenueContractStatus {
-  DRAFT
-  ACTIVE
-  AMENDED
-  TERMINATED
-  COMPLETED
-}
-
-enum RecognitionPattern {
-  POINT_IN_TIME
-  OVER_TIME_STRAIGHT
-  OVER_TIME_USAGE
-  OVER_TIME_MILESTONE
-}
-
-enum RecognitionBasis {
-  ACCRUAL
-  CASH
-}
-
-/// ASC 606 ¶78 allocation methods. PROPORTIONAL is the default
-/// (relative-SSP); RESIDUAL is permitted when SSP for one or more
-/// POs is uncertain; MANUAL captures auditor-required overrides.
-enum AllocationMethod {
-  PROPORTIONAL
-  RESIDUAL
-  MANUAL
-}
-
-/// ASC 606 ¶77 fair-value evidence hierarchy (carried over from
-/// the ASC 605 VSOE/TPE/ESP framework for continuity in audit
-/// trails). RESIDUAL means SSP was determined by the residual
-/// approach (total minus observable SSPs of other POs).
-enum FairValueMethod {
-  ESP
-  VSOE
-  TPE
-  RESIDUAL
-}
-
-// Shared multi-tenancy tables (managed by ledger-core; revenue-rec
-// reads them for tenant resolution). Pen-test pass 4.
-model User {
-  id          String  @id @db.Uuid
-  email       String  @unique
-  displayName String
-  isActive    Boolean @default(true)
-  memberships TenantMembership[]
-
-  @@map("app_user")
-}
-
-model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
-
-  @@map("tenant")
-}
-
-model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
-
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  user   User   @relation(fields: [userId], references: [id])
-
-  @@unique([tenantId, userId])
-  @@map("tenant_membership")
 }

@@ -29,7 +29,7 @@ The architecture canon is `docs/ARCHITECTURE.md`.
 
 1. **AI suggests; humans approve; ledger-core posts.** Same as recon. v0.2 will add the AI contract extractor and the HTTP bridge to ledger-core's `/api/internal/journal-entries`. No code path in this repo may write to ledger-core tables directly.
 
-2. **The schema mirror is a contract.** The ledger-core models in `prisma/schema.prisma` (LegalEntity, Book, Party, JournalEntry, JournalLine, RevenueContract, PerformanceObligation, RevenueContractBookAttributes) must match ledger-core's column-for-column. If you change them here, you've broken the contract.
+2. **The schema mirror is a contract.** The ledger-core models in `prisma/schema.prisma` (Tenant, TenantMembership, User, LegalEntity, Book, Account, Party, JournalEntry, JournalLine, Currency, Period, FiscalCalendar, Item, DimensionSet, RevenueContract, PerformanceObligation, RevenueContractBookAttributes) are GENERATED from ledger-core's schema (currently main@9442667, 2026-07-16) — column-for-column, relations trimmed to the mirrored set, FK-closed (every FK on a mirrored table points at another mirrored table). Never hand-edit them; re-generate from ledger-core on upstream change. One documented deviation: `PerformanceObligation` carries four revenue-rec-added columns (see the schema header) pending upstreaming. Verification: `npm run db:diff` must produce ZERO statements naming any mirrored or revenue-rec-owned table — if it doesn't, the mirror has drifted.
 
 3. **The deterministic core stays deterministic.** SSP allocator (`src/lib/accounting/allocator.ts`) and schedule generator (`src/lib/accounting/schedule.ts`) are pure functions with no DB access, no model calls. The AI lives ONLY in the extractor (v0.2+), and even then it produces structured proposals that humans approve before the deterministic engine takes over.
 
@@ -50,7 +50,7 @@ The cadence is the evidence: SOC 2 CC4 (Monitoring Activities) auditors grade "t
 
 ## What's wired (v0.2)
 
-- Prisma schema: 8 ledger-core mirrored models + 4 revenue-rec-owned models (`ContractDocument`, `AiExtractionSuggestion`, `RecognitionSchedule`, `RecognitionEvent`)
+- Prisma schema: 17 ledger-core mirrored models (FK-closed, generated from ledger-core main@9442667) + 4 revenue-rec-owned models (`ContractDocument`, `AiExtractionSuggestion`, `RecognitionSchedule`, `RecognitionEvent`)
 - SSP allocator (`src/lib/accounting/allocator.ts`) — ASC 606 Step 4 math with `classifyContractEconomics` helper (AT_SSP / DISCOUNTED / PREMIUM)
 - Recognition schedule generator (`src/lib/accounting/schedule.ts`) — supports POINT_IN_TIME + OVER_TIME_STRAIGHT; USAGE / MILESTONE intentionally error with a v0.3 pointer
 - **AI contract extractor** (`src/lib/extraction/ai-extract.ts`) — Claude Opus 4.7 via the official SDK 0.98, `messages.parse` + `zodOutputFormat` for structured output, prompt caching on the system prefix. Per portfolio convention: Opus (not Haiku like recon) because contract interpretation is reasoning-heavy.
@@ -90,7 +90,8 @@ Always use `Decimal` from `decimal.js`. Per-PO and per-period rounding lands on 
 
 ### Database
 - Import `prisma` from `@/lib/db` (the singleton). Never `new PrismaClient()` in a page or component.
-- revenue-rec's `prisma db push` only touches revenue-rec-owned tables. If you add a new model, it must NOT shadow an existing ledger-core table.
+- **`prisma db push` and `prisma migrate dev` are BANNED in this repo** (the npm scripts were removed on purpose). This schema declares a subset of the shared database — a blind push executes the full diff, including destructive ALTERs against ledger-core-owned tables. Schema changes to revenue-rec-owned tables apply via the reviewed-diff protocol: `npm run db:diff` → keep ONLY statements touching revenue-rec-owned tables/enums (`contract_document`, `ai_extraction_suggestion`, `recognition_schedule`, `recognition_event`, `AllocationMethod`, `FairValueMethod`) → `npx prisma db execute --file <reviewed.sql>`. Full protocol in the `prisma/schema.prisma` header and `docs/ARCHITECTURE.md`.
+- If you add a new model, it must NOT shadow an existing ledger-core table.
 - Querying ledger-core's tables is fine; writing to them via Prisma is forbidden. Adjustment / recognition JEs go through the HTTP bridge.
 
 ### AI integration (v0.2+)
