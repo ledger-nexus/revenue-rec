@@ -42,13 +42,13 @@
 //        2. Review: keep ONLY statements touching revenue-rec-owned tables
 //           (contract_document, ai_extraction_suggestion,
 //           recognition_schedule, recognition_event), revenue-rec-owned
-//           enums (AllocationMethod, FairValueMethod). Everything else —
-//           including any statement against performance_obligation or any
-//           other ledger-core-owned table — is subset-of-shared-DB noise and
-//           MUST NOT run. (The old carve-out permitting
-//           performance_obligation column additions from this repo is gone:
-//           those columns are upstreamed, and new ones go to ledger-core
-//           first. See ledger-core#262.)
+//           tables only. Everything else — including anything touching
+//           performance_obligation OR the AllocationMethod / FairValueMethod
+//           enums, all of which are LEDGER-CORE-OWNED since its PR #262 — is
+//           subset-of-shared-DB noise and MUST NOT run. (The old carve-out
+//           permitting performance_obligation column additions from this repo
+//           is gone: those columns are upstreamed, and new ones go to
+//           ledger-core first, then this mirror re-generates.)
 //        3. npx prisma db execute --file <reviewed.sql>
 //
 // The repos share one Postgres database — revenue-rec connects with the
